@@ -8,7 +8,6 @@
 import network
 wlan = network.WLAN(network.STA_IF)
 wlan.active(False)
-from wlan_cfg import wlan_cfg
 
 
 # Init BLE device
@@ -51,7 +50,7 @@ acc.deinit_spi() # Release acc.spi
 # Run main
 from main import main
 display_spi = machine.SPI(1, baudrate=40_000_000, sck=machine.Pin(6), mosi=machine.Pin(2), miso=machine.Pin(7))
-main(display_spi, display_cs, int1, wlan, ble, wlan_cfg)
+main(display_spi, display_cs, int1, wlan, ble)
 display_spi.deinit()
 display_cs.value(1)
 
@@ -60,3 +59,4 @@ acc.set_measure_mode(False)
 acc.deinit_spi() # Release acc.spi
 
 machine.deepsleep()
+
