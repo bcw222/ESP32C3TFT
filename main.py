@@ -1,6 +1,4 @@
-from micropython import schedule
-from machine import Pin, Timer
-from esp32 import NVS
+from machine import Pin
 from utils import find_files, ClickDetector
 
 import gc
@@ -9,72 +7,39 @@ import st7789
 import lib.vga2_8x16 as font
 
 def main(display_spi, display_cs, sleep_pin, wlan, ble, wlan_cfg):
+    rlv = find_files('.rlv', '.')[0]
+    
+    ## initialize display
     display = st7789.ST7789(display_spi, 240, 240, cs=display_cs, reset=Pin(20, Pin.OUT), dc=Pin(4, Pin.OUT), backlight=Pin(5, Pin.OUT), rotation=2)
     display.init()
-    
-    imgs = find_files('.png', 'imgs')
-    
-    nvstatus = NVS('ESP32C3TFT')
+    display.fill(st7789.BLACK)
     
     ## state variables
-    try:
-        cursor = nvstatus.get_i32('entrypoint')
-        imgs[cursor]
-        print(f"read entrypoint at {cursor}: {imgs[cursor]}")
-    except:
-        cursor = 0
-        print(f"failed reading entrypoint, default to 0")
-    displayed = -1
-    show_name = False
-    name_shown = False
-    setting_entrypoint = False
-    sleep_mode = False
+    status = False
+    play = False
     
-    def boot_pin_handler(clicktimes):
-        nonlocal cursor
-        nonlocal show_name
-        if clicktimes == 1:
-            cursor = (cursor + 1) % len(imgs)
-        elif clicktimes == 2:
-            show_name = True
+    def pin_handler(clicktimes):
+        nonlocal play
+        play = True
     
-    def func_pin_handler(clicktimes):
-        nonlocal cursor
-        nonlocal setting_entrypoint
-        nonlocal sleep_mode
-        if clicktimes == 1:
-            cursor = (cursor - 1) % len(imgs)
-        elif clicktimes == 2:
-            setting_entrypoint = True
-        elif clicktimes == 3:
-            sleep_mode = True
-    
-    boot_pin = ClickDetector(Pin(9, Pin.IN, Pin.PULL_UP), 0, boot_pin_handler, 2)
-    func_pin = ClickDetector(Pin(21, Pin.IN, Pin.PULL_UP), 1, func_pin_handler, 3, debounce_time=50)
+    boot_pin = ClickDetector(Pin(9, Pin.IN, Pin.PULL_UP), 0, pin_handler, 1)
+    func_pin = ClickDetector(Pin(21, Pin.IN, Pin.PULL_UP), 1, pin_handler, 1)
     
     while True:
-            if displayed != cursor:
-                show_name = False
-                name_shown = False
-                displayed = cursor
-                display.fill(st7789.BLACK)
-                print(f"displaying {displayed}: {imgs[displayed]}")
-                gc.collect() # Render image takes a lot of ram so collect garbage to avoid oom
-                display.png(imgs[displayed], 0, 0)
-                continue
-            if show_name and not name_shown:
-                name_shown = True
-                display.text(font, imgs[displayed], 0, 0)
-                continue
-            if setting_entrypoint:
-                nvstatus.set_i32('entrypoint', cursor)
-                nvstatus.commit()
-                setting_entrypoint = False
-                print(f"set entrypoint {displayed}: {imgs[displayed]}")
-                display.text(font, f"set entrypoint {displayed}: ", 0, 240 - font.HEIGHT * 2)
-                display.text(font, imgs[displayed], 0, 240 - font.HEIGHT)
-                continue
-            if sleep_mode or sleep_pin.value():
-                display.off()
-                break
-            time.sleep_ms(200)
+        if not play and not status:
+            display.text(font, rlv, 0, 0)
+            rlv_info = display.rlv_info(rlv)
+            for i, (k, v) in enumerate(rlv_info.items()):
+                display.text(font, f"{k}: {v}", 0, font.HEIGHT * (i + 1))
+            display.text(font, f"video_duration: {rlv_info['frame_count'] / rlv_info['fps']} s", 0, font.HEIGHT * (i + 2))
+            status = True
+            continue
+        if play:
+            status = False
+            display.rlv_play(rlv, 0, 0, st7789.WHITE, st7789.BLACK, cache_size=4096)
+            play = False
+            continue
+        if sleep_pin.value():
+            display.off()
+            break
+        time.sleep_ms(200)
