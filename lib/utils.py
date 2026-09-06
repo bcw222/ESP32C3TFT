@@ -58,7 +58,14 @@ class ClickDetector:
         
     def _irq_handler(self, pin):
         if self.scheduled:
-            schedule(self._process_press, None)
+            # 硬件 ISR：只入队，一切判断/状态修改留给 scheduled 上下文。
+            # 按键抖动会连发多个边沿而 schedule 队列仅 8 深且主循环阻塞
+            # 时不排空——满队 RuntimeError 必须吞掉（本边沿已在队内，
+            # 消抖逻辑保证同一次按键只结算一次，丢弃抖动沿无实质影响）。
+            try:
+                schedule(self._process_press, None)
+            except RuntimeError:
+                pass
         else:
             self._process_press(None)
     
@@ -88,6 +95,11 @@ class ClickDetector:
         self.current_clicks = 0
         self.timer.deinit()  # 释放定时器
         if self.scheduled:
-            schedule(self.callback, current_clicks)
+            try:
+                schedule(self.callback, current_clicks)
+            except RuntimeError:
+                # 队列满：软定时器回调本就运行在主线程 VM 上下文，
+                # 直接调用等价且兜住丢回调。
+                self.callback(current_clicks)
         else:
             self.callback(current_clicks)

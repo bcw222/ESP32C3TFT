@@ -1,4 +1,12 @@
+# System
 .DS_Store
 
+# Python
+__pycache__/
+
+# Temporary
 dist/
+
+# Config
 wlan_cfg.py
+usage_cfg.py

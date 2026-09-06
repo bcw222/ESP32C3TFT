@@ -1,1 +1,6 @@
-wlan_cfg = 'SSID', 'password'
+# WiFi 网络：{ssid: 密码}，按书写顺序尝试，靠前的优先；
+# 一个连不上（每个 15s 超时，可在 usage_cfg.wifi_timeout 调）自动换下一个。
+networks = {
+    'ap': 'your-password',
+    # 'backup-ap': 'its-password',
+}

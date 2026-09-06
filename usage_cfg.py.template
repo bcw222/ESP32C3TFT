@@ -1,0 +1,106 @@
+server = {
+    # usage-server 地址：填 base（http://host:8765）即可；端点
+    # /api/page?page=N、/api/render/<hash> 由端侧自动拼接。
+    # 带 /api/ 路径的填法也兼容（自动截掉 /api/...）。
+    'url': 'http://192.168.1.10:8765',
+    'key': 'change-me-long-random-string',         # auth key（以
+                                                   # Authorization: Bearer
+                                                   # 头过网，不落 URL/日志）
+    # SSR 贴图下载重试：单张最多尝试次数 + 次间固定延迟 ms。
+    # 瞬时抖动（网络/服务端 5xx）自愈；次数用尽槽空置，下轮平补刷新。
+    # 重试期间时间条照常走字（间隔切片睡 + on_wait 回调）。
+    'ssr_retry': 3,
+    'ssr_retry_delay_ms': 2000,
+    # 本地贴图缓存（rcache/）容量上限：LRU 淘汰，常看的图不挤掉。
+    # 默认 50（多 provider × 昼夜双套 hash 共存）；越界/非法回默认。
+    'rcache_max_files': 50,
+}
+# 各订阅凭据全部在服务器侧配置（见其 config.yaml），端侧不再持有；
+# 页面序列由服务器响应的 providers[] 决定，端侧零配置。
+
+# 时间参数（秒），全部可调
+poll_interval = 60      # 亮屏轮询周期（时间条满条 = 这个值）
+dim_after = 60          # 无操作（按键/拿起来动）多久后调暗背光
+dim_poll_interval = 300 # 调暗后的轮询周期（时间条已过部分自动压缩适配新周期）
+wifi_timeout = 15       # WiFi 单个 AP 的连接超时（超时换下一个 AP）
+
+# 记住页：同页连续手动刷新（中途无调暗、无换页）达到 refresh_remember_n
+# 次 → 记住当前页（NVS），下次开机直接转到该页（不再从总览页开始）。
+# 记忆是长期书签：每次开机都恢复它，仅开机加载失败（不在序列/WiFi
+# 失败）才清除；换页只清零连续计数、不清除已记书签。
+refresh_remember_n = 3
+
+# 主循环目标帧时长（ms）：帧率锚点，按 target−已用时 动态补睡
+target_frame_ms = 50
+
+# ---- 背光亮度（PWM 占空比 0-65535；注释掉本节即用内置默认）----
+# 日夜 × 亮暗 2×2 四档：白底屏夜间刺眼，night_bright 默认压得比白天低。
+# brightness = {
+#     'day_bright':   65535,   # 白天亮屏（拿在手里看）
+#     'day_dim':      20000,   # 白天无操作调暗
+#     'night_bright': 24000,   # 夜间亮屏
+#     'night_dim':     2500,   # 夜间调暗（待机）
+# }
+
+# 夜间模式：night_start..night_end 为本地小时（可跨零点，如 22..7）；
+# 昼夜两套全量配色整体切换（day 白底深字 / night 深底亮字），夜间
+# 不只是压背光而是整个 UI 换肤。任一设为 None 关闭。tz_offset 为
+# UTC 偏移小时（设备无 NTP，用 server_time 校准后按此折算本地时）
+night_start = 22
+night_end = 7
+tz_offset = 8
+
+# ---- 配色方案（usageapp/theme.py）----
+# 颜色值均为 'RRGGBB' hex（也可 (r,g,b) 元组）；只写想改的键，
+# 其余用默认。昼夜两套全量配色整体切换：day 白底深色字 / night 深
+# 底亮色字（SSR 贴图 bg/theme 随夜态走，hash 换套双套缓存共存）。
+# 两种写法：双层 {'day': {...}, 'night': {...}} 分别覆盖；或旧单层
+# {...}（等价于只覆盖 day 套，夜间用内置默认夜间色板）。
+# 下方 palette 为 v3 定稿（2026-08-31），与 theme.py 内置默认一致——
+# 注释掉整个 palette 即用内置默认（效果相同，以下仅作覆盖起点）。
+palette = {
+    'day': {
+        'bg':      'FFFFFF',   # 全屏底色
+        'fg':      '000000',   # 默认前景（标题回退/错误行）
+        'rows':    ('0E6FC4',  # 配额行色×4（避开红/琥珀——阈值色专用）
+                    '00897B',
+                    '6C3FC2',
+                    '5F6670'),
+        'warn':    'C87800',   # percent>=80 琥珀
+        'crit':    'C80000',   # percent>=95 红
+        'track':   'ECECEF',   # 进度条轨道
+        'ok':      '008C00',   # 状态点/状态 ok
+        'stale':   '8A9199',   # 状态点 stale
+        'err':     'C80000',   # 状态点 error/错误提示
+        'dim':     '404040',   # 弱化文本（数额/币种码/无峰谷大字）
+        'caption': '555A61',   # 灰标签/倒计时/时间条标注
+        'peak':    'C80000',   # 峰谷红（大字/总览余额行）
+        'offpeak': '008C00',   # 峰谷绿
+        'timeline': ('DADDE2',  # 时间条四色：wait(等待下一轮条底)/
+                     '008C00',  # network(主请求段)/upstream/ssr
+                     'C87800',
+                     '0E6FC4'),
+    },
+    'night': {
+        'bg':      '000000',   # 夜间深底
+        'fg':      'FFFFFF',   # 夜间亮字
+        'rows':    ('42A5F5',
+                    '2FD6B0',
+                    'B388FF',
+                    '9AA1AC'),
+        'warn':    'FFB340',
+        'crit':    'FF5A5A',
+        'track':   '262B33',
+        'ok':      '3DDC84',
+        'stale':   '5A616B',
+        'err':     'FF5A5A',
+        'dim':     'B0B0B0',
+        'caption': '8A919C',
+        'peak':    'FF5A5A',
+        'offpeak': '3DDC84',
+        'timeline': ('20242C',
+                     '3DDC84',
+                     'FFB340',
+                     '42A5F5'),
+    },
+}
