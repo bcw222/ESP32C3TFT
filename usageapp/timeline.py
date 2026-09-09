@@ -7,6 +7,9 @@
   冻结重涂，其后 SSR 段（端侧实测贴图下载，蓝色）实时增长
 - SSR 冻结 → ssr 定格（蓝），其后 wait 灰随时间延伸到周期末
   （ssr 与 wait 异色）；满条 = 轮询周期（相位契约不变）
+- 切套补下载（2026-09-07）：冻结相位中途追加一段 ssr（当前进度后
+  紧跟增量走字），wait 从追加段尾续铺——相位/锚点/周期不动；
+  右标注 ssr 位 = 冻结值 + 追加实时，完成后并入重新冻结
 - 周期起点固定为"上一轮理想起点 + 周期"，相邻刷新间隔恒定
 - 一 fetch 一重置；不保留历史；周期切换（调暗拉长轮询）相位按新周期
   重算压缩
@@ -77,6 +80,11 @@ class Timeline:
         self._lab_right = ''     # 右标注已画文本
         self._lab_cols = None    # 右标注已画颜色组（同文本不同色也要重画）
         self._lab_parts = None   # 右标注已画分段（None=单段形态）
+        # 追加段（切套补下载，2026-09-07）：冻结 wait 相位中途在当前
+        # 进度后追加一段 ssr 增量走字——相位/锚点不动，仅 wait 起点后移
+        self._extra_x0 = 0       # 追加段起点 px（begin_extra 时捕获 _last_c）
+        self._extra_t0 = None    # 追加段起始 ticks（None=无追加段）
+        self._extra_ms = None    # 完成后冻结的追加时长（None=进行中）
 
     def _apply_colors(self):
         """四色直通（昼夜两套色板的 RGB 已按各自底色调好对比度，
@@ -119,6 +127,9 @@ class Timeline:
         self._seg_painted = True
         self._err = False
         self._retrying = False
+        self._extra_x0 = 0       # 追加段随新周期一并复位
+        self._extra_t0 = None
+        self._extra_ms = None
         self._lab_left = ''     # 标注区可能被错误页/连接日志写过：强制重画
         self._lab_fixed = None
         self._lab_right = ''
@@ -133,6 +144,26 @@ class Timeline:
         begin_cycle 复位。主请求失败后的延时重发不置位（仍 fetching，
         2026-09-06 用户定稿：retrying = 次要 fetch（SSR）失败过）。"""
         self._retrying = bool(on)
+
+    def begin_extra(self):
+        """切套补下载开始（2026-09-07）：在当前冻结相位后追加一段
+        ssr 增量走字——锚点/周期/已完成分段全部不动。仅冻结/wait
+        相位有效（fetch 进行中忽略：追段只属于 wait 相位）；重复
+        调用忽略。"""
+        if self.fetch_ms is None or self._extra_t0 is not None:
+            return
+        self._extra_x0 = self._last_c
+        self._extra_t0 = time.ticks_ms()
+        self._extra_ms = None
+
+    def extra_done(self):
+        """追加段完成：实测时长并入冻结 ssr（右标注重新冻结）。
+        追加段几何（_extra_x0/_extra_ms）保留供后续帧增量重画。"""
+        if self._extra_t0 is None:
+            return
+        self._extra_ms = max(time.ticks_diff(time.ticks_ms(),
+                                             self._extra_t0), 0)
+        self._ssr_ms += self._extra_ms
 
     def mark_response(self, timing=None):
         """主响应到达（文本 payload 已收到）：右标注 network/upstream
@@ -239,12 +270,19 @@ class Timeline:
         0.0（用户定稿：数字说真话，不回退单段灰）。"""
         now = time.ticks_ms()
         if self.fetch_ms is not None:
-            # 完成/失败：三段全冻结（带 ' s' 尾标单位）
+            # 完成/失败：三段全冻结（带 ' s' 尾标单位）；切套补下载
+            # 追加段进行中时 ssr 位继续走字（2026-09-07：冻结值+追加
+            # 实时，完成后由 extra_done 并入重新冻结）
             parts = [self._fmt_secs(v) for v in self._timing] \
                 if self._timing else []
             if self._timing:
-                parts.append(self._fmt_secs(self._ssr_ms))
-                return (parts, None, True)
+                extra = 0
+                freeze = True
+                if self._extra_t0 is not None and self._extra_ms is None:
+                    extra = max(time.ticks_diff(now, self._extra_t0), 0)
+                    freeze = False
+                parts.append(self._fmt_secs(self._ssr_ms + extra))
+                return (parts, None, freeze)
             # 总耗时 0（瞬时拒绝）：无可拆实测段，回退灰单段
             return (None, _label_colors()[1], True)
         if self._timing is not None:
@@ -423,19 +461,34 @@ class Timeline:
             # ssr=蓝、wait=灰）；**请求出错（主请求失败 / SSR 下载
             # 失败）时 wait 段改涂错误红**作 UI 提示（2026-09-02 用户
             # 定稿），下一轮 begin_cycle 复位。
+            # 追加段（切套补下载，2026-09-07）：进行中让 wait 起点即
+            # 当前边缘（c_sv 借 live 前进区增量走字）；完成后 wait 从
+            # 追加段尾续铺——相位/锚点/周期不动，仅颜色语义变化。
             wait_c = self.c_err if self._err else self.c_wait
             seg_end_ms = self._resp_ms + self._ssr_ms
             ssr_px = min(seg_end_ms * self.w // total, self.w) \
                 if seg_end_ms > 0 else resp_px
+            w_start = ssr_px
+            if self._extra_t0 is not None:
+                x0 = self._extra_x0 if self._extra_x0 > ssr_px else ssr_px
+                if self._extra_ms is None:
+                    w_start = live_px        # 进行中：追加段吃掉前进区
+                else:
+                    e = x0 + self._extra_ms * self.w // total
+                    if e > w_start:
+                        w_start = e
             if live_px > self._last_c:
-                if self._last_c < ssr_px:
+                if self._last_c < w_start:
                     start = max(self._last_c, resp_px)
-                    end = min(live_px, ssr_px)
+                    end = min(live_px, w_start)
                     if end > start:
                         display.fill_rect(self.x + start, self.y,
                                           end - start, self.h, self.c_sv)
-                if live_px > ssr_px:
-                    display.fill_rect(self.x + ssr_px, self.y,
-                                      live_px - ssr_px, self.h,
-                                      wait_c)
+                if live_px > w_start:
+                    start = self._last_c if self._last_c > w_start \
+                        else w_start
+                    if live_px > start:
+                        display.fill_rect(self.x + start, self.y,
+                                          live_px - start, self.h,
+                                          wait_c)
                 self._last_c = live_px

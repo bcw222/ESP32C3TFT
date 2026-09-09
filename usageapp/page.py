@@ -109,19 +109,28 @@ _AMT_CHAR_N = 11                          # 数字最多 11 字符
 OV_PCT_X = 96 + 64 + 6                    # =166
 
 # 档位表 {行数: (y0, step, bar_h, bar_dy, amount_inline)}
+# 条下数额行高需求 = bar_dy + bar_h + 2 + 16；step 须 ≥ 需求，否则
+# 下行标签贴图会盖住上行条下数额（2026-09-09 修：不用 inline——
+# SSR 贴图清除矩形整槽宽会把同行右对齐数字盖掉，用户定稿保留条下
+# 数额原布局，仅微调 y0/step：普通 3 行 (54,50) 恰好相接；峰谷 3 行
+# (64,46,12,16) 压缩条高 2px + 条上移 2px 换出间距；峰谷 2 行 step 56)。
 _LAYOUTS = {
     1: (96, 64, 28, 22, False),
     2: (70, 68, 18, 20, False),
-    3: (56, 48, 14, 18, False),
+    3: (54, 50, 14, 18, False),
     4: (54, 38, 12, 18, True),
 }
 # 密集 + 峰谷两小行：quota 区整体下移，步距压缩（换出峰谷 ~36px 空档）。
 # 1 档 = 单窗 plan（qwen 谷价形态）：大条布局与普通 1 行档相同，只是
 # 峰谷两小行占掉 title 下的 ~16px，配额区从 y0=96 起（2026-09-02 补）。
+# 2 档 step 54→56：行高需求 56，原 54 差 2px 下行标签擦到上行数额。
+# 3 档 (76,40,14,18)→(64,46,12,16)：原 40 差 10px 数额被下一行标签盖；
+# 可用区 62..204 只有 142px，3 行需求 50 放不下——条高 14→12、条上移
+# bar_dy 18→16 使需求降到 46，y0 76→64 贴峰谷行下缘换出底部空间。
 _LAYOUTS_PEAK = {
     1: (96, 64, 28, 22, False),
-    2: (86, 54, 18, 20, False),
-    3: (76, 40, 14, 18, False),
+    2: (86, 56, 18, 20, False),
+    3: (64, 46, 12, 16, False),
     4: (70, 32, 12, 18, True),
 }
 
@@ -508,6 +517,7 @@ class ProviderPage:
             self.peak = None
 
         rows = []
+        rows_alt = []
         for quota in pdata.get('quotas') or []:
             window = str(quota.get('id', '?')).split(':')[-1]
             unit = UNIT_SHORT.get(quota.get('unit'), '')
@@ -527,6 +537,7 @@ class ProviderPage:
             reset_at = quota.get('reset_at')
             rows.append((label, percent, reset_at, amount,
                          quota.get('label_render')))
+            rows_alt.append(quota.get('label_render_alt'))
         self._apply_deltas(rows, now_epoch, dark)
         self.rows = rows
 
@@ -535,21 +546,35 @@ class ProviderPage:
         # 有 quota 且有峰谷 → 密集型：峰谷退化为 title 下两小行。
         self._sparse = (len(rows) == 0 and (self.balance is not None
                                            or self.peak is not None))
-        # 双套记忆登记（槽位+tag → 本套 hash；见 _alt 注释）
+        # 双套记忆登记（槽位+tag → hash）：主 hash 归本套 tag，alt
+        # hash 归对偶 tag——双发契约（render.check_alt 已拦缺 alt 的
+        # 旧服务器）下每轮 fetch 两套都齐，不靠跨轮历史积累
         tag = 'N' if night else 'D'
+        atag = 'D' if night else 'N'
         alt = self._alt
         if self.title_hash:
             alt['t' + tag] = self.title_hash
+        if pdata.get('title_render_alt'):
+            alt['t' + atag] = pdata['title_render_alt']
         for i, r in enumerate(rows):
             if r[4]:
                 alt['r{}{}'.format(i, tag)] = r[4]
-        if self.balance is not None and self.balance.get('caption_render'):
-            alt['bc' + tag] = self.balance['caption_render']
+                if i < len(rows_alt) and rows_alt[i]:
+                    alt['r{}{}'.format(i, atag)] = rows_alt[i]
+        if self.balance is not None:
+            if self.balance.get('caption_render'):
+                alt['bc' + tag] = self.balance['caption_render']
+            if isinstance(bal, dict) and bal.get('caption_render_alt'):
+                alt['bc' + atag] = bal['caption_render_alt']
         if self.peak is not None:
             if self.peak.get('badge_render'):
                 alt['pb' + tag] = self.peak['badge_render']
+            if isinstance(pk, dict) and pk.get('badge_render_alt'):
+                alt['pb' + atag] = pk['badge_render_alt']
             if self.peak.get('caption_render'):
                 alt['pc' + tag] = self.peak['caption_render']
+            if isinstance(pk, dict) and pk.get('caption_render_alt'):
+                alt['pc' + atag] = pk['caption_render_alt']
 
     def _apply_deltas(self, rows, now_epoch, dark=False):
         """记录同窗口 percent 的变化；未过期的旧 Δ 保留继续显示。
@@ -601,8 +626,9 @@ class ProviderPage:
         """昼夜切换：贴图槽整体换到另一套 hash（_alt 记忆库回填）。
         hash 含 theme/bg——两套图内容不同 hash 不同，但 rcache 双套
         共存，命中即零网络直接贴（服务端也不重渲染：同内容 hash 缓存
-        命中）。记忆缺失的槽置空（绝不留旧套图贴新底色），等下轮
-        平补。数据值（percent/倒计时/金额）不变，不触发任何 fetch。"""
+        命中）。记忆缺失的槽置空（绝不留旧套图贴新底色）；app 切换
+        后经 render_slots 检查，任一槽缺失即立即 fetch 补齐（见
+        app 夜间切换段）。数据值（percent/倒计时/金额）不变。"""
         tag = 'N' if night else 'D'
         alt = self._alt
         self.title_hash = alt.get('t' + tag)
@@ -613,6 +639,21 @@ class ProviderPage:
         if self.peak is not None:
             self.peak['badge_render'] = alt.get('pb' + tag)
             self.peak['caption_render'] = alt.get('pc' + tag)
+
+    def render_slots(self):
+        """当前页应占的贴图槽位 [(hash|None, slot_w), ...]（含 None=
+        该槽无 hash）。app 昼夜切换 swap 后据此判缺失并带 ?w= 下载：
+        全槽在 rcache → 零网络；否则仅补缺失贴图，不碰数据端点。"""
+        out = [(self.title_hash, TITLE_SLOT_W)]
+        out += [(r[4], LABEL_SLOT_W) for r in self.rows]
+        if self.balance is not None:
+            out.append((self.balance.get('caption_render'),
+                        CAPTION_SLOT_W))
+        if self.peak is not None:
+            out.append((self.peak.get('caption_render'), CAPTION_SLOT_W))
+            if self._sparse:
+                out.append((self.peak.get('badge_render'), BADGE_SLOT_W))
+        return out
 
     def render(self, display, font, now_epoch, store=None):
         """返回 True 表示发生了全量重画（app 据此重画 RSSI 角标）。"""
@@ -939,10 +980,15 @@ class ProviderPage:
                     display.text(font, cd_new, x, ybar, color, BG())
 
             if amount != amt_old:
-                if inline:          # 右对齐文本长度会变：固定区域擦除
-                    display.fill_rect(64, y, 104, font.HEIGHT, BG())
+                if inline:          # 右对齐文本长度会变：精确擦旧新最大宽
+                    # （仅 4 行紧凑档；2026-09-09：旧固定区 x64..168 会
+                    # 擦掉标签贴图右半，改按文本实宽擦除）
+                    old_w = len(amt_old) * _CHAR_W
+                    new_w = len(amount) * _CHAR_W
+                    w = max(old_w, new_w)
+                    display.fill_rect(168 - w, y, w, font.HEIGHT, BG())
                     display.text(font, amount,
-                                 168 - len(amount) * _CHAR_W, y,
+                                 168 - new_w, y,
                                  _col(_TEXT_DIM_RGB), BG())
                 else:
                     _swap_text(display, font, amt_old, amount,
@@ -1076,6 +1122,7 @@ class OverviewPage:
         st = str(ov.get('status') or 'ok')
         self.status = st if st in ('ok', 'stale') else 'stale'
         rows = []
+        items_alt = []
         for item in (ov.get('items') or [])[:self.MAX_ROWS]:
             try:
                 percent = float(item['percent'])
@@ -1102,26 +1149,39 @@ class OverviewPage:
                          rst if isinstance(rst, (int, float)) else None,
                          stat or self.status,
                          state))
+            items_alt.append(item.get('render_alt'))
         self.rows = rows
-        # 双套记忆登记（槽位+tag → 本套 hash）
+        # 双套记忆登记（同 ProviderPage：主 hash 归本套、alt 归对偶套）
         tag = 'N' if night else 'D'
+        atag = 'D' if night else 'N'
         if self.title_hash:
             self._alt['t' + tag] = self.title_hash
+        if ov.get('title_render_alt'):
+            self._alt['t' + atag] = ov['title_render_alt']
         for i, r in enumerate(rows):
             if r[5]:
                 self._alt['r{}{}'.format(i, tag)] = r[5]
+                if i < len(items_alt) and items_alt[i]:
+                    self._alt['r{}{}'.format(i, atag)] = items_alt[i]
 
     def invalidate(self):
         self._sig = None
 
     def swap_renders(self, night):
         """昼夜切换：贴图槽换另一套 hash（_alt 回填，rcache 直读；
-        语义同 ProviderPage.swap_renders——零网络，缺失槽置空）。"""
+        语义同 ProviderPage.swap_renders；缺失槽由 app 经
+        render_slots 判断后立即 fetch 补齐）。"""
         tag = 'N' if night else 'D'
         alt = self._alt
         self.title_hash = alt.get('t' + tag)
         self.rows = [r[:5] + (alt.get('r{}{}'.format(i, tag)),) + r[6:]
                      for i, r in enumerate(self.rows)]
+
+    def render_slots(self):
+        """当前页应占的贴图槽位 [(hash|None, slot_w), ...]（语义同
+        ProviderPage.render_slots）。"""
+        return ([(self.title_hash, TITLE_SLOT_W)]
+                + [(r[5], OV_ITEM_SLOT_W) for r in self.rows])
 
     def set_error_keep(self, message=''):
         """网络失败但保留旧数据：标 stale + 页头下 ASCII 单行错误

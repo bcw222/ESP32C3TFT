@@ -124,6 +124,35 @@ def collect(data):
     return out
 
 
+def check_alt(data):
+    """双 hash 契约校验（2026-09-07 定稿）：任一槽有主 hash 而缺
+    alt 对偶 → FetchError——旧服务器不兼容直接报错，走既有失败路径
+    （错误页/degrade_stale），不做静默兼容（用户拍板）。主响应解析
+    前在 app.do_fetch 调；无任何 render 字段（如 status=error 页/
+    无 PIL 服务端）时通过。"""
+    if not isinstance(data, dict):
+        return
+
+    def chk(main, alt):
+        if main and not alt:
+            raise FetchError('missing alt render (old server?)')
+
+    chk(data.get('title_render'), data.get('title_render_alt'))
+    for quota in data.get('quotas') or []:
+        if isinstance(quota, dict):
+            chk(quota.get('label_render'), quota.get('label_render_alt'))
+    for item in data.get('items') or []:
+        if isinstance(item, dict):
+            chk(item.get('render'), item.get('render_alt'))
+    bal = data.get('balance')
+    if isinstance(bal, dict):
+        chk(bal.get('caption_render'), bal.get('caption_render_alt'))
+    pk = data.get('peak')
+    if isinstance(pk, dict):
+        chk(pk.get('badge_render'), pk.get('badge_render_alt'))
+        chk(pk.get('caption_render'), pk.get('caption_render_alt'))
+
+
 def _remove(path):
     try:
         os.remove(path)

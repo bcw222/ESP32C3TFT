@@ -187,27 +187,48 @@ def server_base(url):
 
 def _endpoint_get(server_cfg, endpoint, page=None, on_wait=None, night=False):
     """对 {base}{endpoint}?client=1&h&bg&theme&fg&caption&peak&offpeak
-    做一次 GET；page（页码）可选，前置拼在 client 之前。200 → 解析
-    json；非 200/坏 json → FetchError。bg/theme/前景色覆盖均由
-    theme.py 按当前夜态与 palette 给出（SSR 颜色全部走 palette——
-    服务端按请求色渲染贴图）。"""
+    &altbg&alttheme&altfg&altcaption&altpeak&altoffpeak 做一次 GET；
+    page（页码）可选，前置拼在 client 之前。200 → 解析 json；非 200/
+    坏 json → FetchError。两套渲染参数均由 theme.py 按当前/对偶夜态
+    与 palette 给出（双 hash 契约 2026-09-07：响应每槽双发
+    *_render + *_render_alt，夜切换仅换索引——数据/上游零触碰）。"""
     full = server_base(server_cfg['url']) + endpoint
     host, port, path = _parse_url(full)
     c = theme.ssr_colors(night)
+    ca = theme.ssr_colors(not night)
     if page is not None:
         path += '?page={}'.format(int(page)) + '&'
     else:
         path += '?'
     path += ('client=1&h={}&bg={}&theme={}'
-             '&fg={}&caption={}&peak={}&offpeak={}').format(
+             '&fg={}&caption={}&peak={}&offpeak={}'
+             '&altbg={}&alttheme={}&altfg={}&altcaption={}'
+             '&altpeak={}&altoffpeak={}').format(
         _H, theme.current_bg_hex(night), theme.current_theme(night),
-        c['fg'], c['caption'], c['peak'], c['offpeak'])
+        c['fg'], c['caption'], c['peak'], c['offpeak'],
+        theme.current_bg_hex(not night), theme.current_theme(not night),
+        ca['fg'], ca['caption'], ca['peak'], ca['offpeak'])
     key = str(server_cfg.get('key') or server_cfg.get('token', ''))
     code, body = http_get(host, port, path, on_wait, auth_key=key)
     if code != 200:
+        # 非 200：优先解析 body 的 error.code 机器码（provider 页上游
+        # 失败 → 503 + {"error": {"code": ...}}，2026-09-08 无状态化）——
+        # ERR_Y 单行直画机器码（限宽可截断）；无结构化 code（400 参数
+        # 类错误）回退 HTTP {code} + 可读片段。
         raw = body[:48]            # 可读错误片段（如 400 参数/版本协商失败）
         snippet = ''.join(chr(b) if 32 <= b < 127 else ' '
                           for b in raw).strip()
+        code_str = ''
+        try:
+            err_obj = ujson.loads(body)
+            if isinstance(err_obj, dict):
+                err = err_obj.get('error')
+                if isinstance(err, dict):    # error 也可能是 str（400 参数类）
+                    code_str = str(err.get('code', ''))
+        except ValueError:
+            code_str = ''
+        if code_str:
+            raise FetchError(code_str)
         raise FetchError('HTTP {} {}'.format(code, snippet)[:40])
     try:
         data = ujson.loads(body)

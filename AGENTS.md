@@ -101,9 +101,13 @@ mpy-cross -o dst.mpy src.py       # 单文件交叉编译
   可选；非法 400。**前景色覆盖（fg/caption/peak/offpeak）由端侧
   palette 随请求传出**——SSR 颜色全部走 palette（服务端按请求色渲染，
   缺省用其内置 _THEME_FG/THEME_SEMANTIC；色入像素即入 hash）。
-- **新鲜度归客户端**：服务器无抓取缓存，每个数据请求实时打上游；
-  轮询周期/换页/强刷节奏全由端侧定，协议无 refresh 参数。上游失败时
-  服务端降级回 last-known-good（`status=stale` + 真实 `updated_at`）。
+- **新鲜度归客户端 + 服务端无状态（2026-09-08 定稿）**：服务器无抓取
+  缓存、**无 last-known-good**，每个数据请求实时打上游；轮询周期/换页/
+  强刷节奏全由端侧定，协议无 refresh 参数。**历史快照在端侧**——服务端
+  随时可重启，端侧数据不丢。上游失败：provider 页返回 **503** +
+  `{"error": {"code": ...}}`（端侧按非 200 走统一失败路径）；overview
+  聚合页行级 `items[].status=error`（红 `err`）、页面级恒 ok + 下发
+  `updated_at`（聚合时刻，端侧 degrade_stale 时 stale 徽标带年龄）。
 - `client=1` 声明端侧能力；**响应无 version 字段**（端侧声明啥收啥）。
 - 认证走 `Authorization: Bearer <key>` 头，**key 不落 URL/日志**。
 - `server_time` 是 unix **秒**，数据端点都回，任一端点都能校准时钟。
@@ -118,29 +122,37 @@ mpy-cross -o dst.mpy src.py       # 单文件交叉编译
   动态非预期的，不入 SSR 不占 rcache）；任何错误都是端侧 ASCII 单行
   （可截断）——`error.code` 优先、无则 FetchError 文本。请求出错时
   时间条 wait 段改涂错误红作 UI 提示（主请求失败 + SSR 下载失败都涂）。
-- **错误模型（2026-09-05 定稿）**：状态徽标只有两态 ok/stale（error
-  徽标删除——`STATUS_TEXT` 只剩 ok、`_status_rgb` 缺省灰）。失败按
-  `loaded`（首次成功加载标志）分流：**从未成功** → 独立错误页
-  （`retry Ns` 倒计时 + **连续失败计数 `fail #N`**，单调递增证明循环
-  活着在重试——同内容重试屏显无变化看不出；成功归零）；**成功过** →
-  `degrade_stale`：全部页（含总览）标 stale 保留旧数据 + 页头下 ERR_Y
-  ASCII 单行错误，当前页保持显示不跳页。服务器 200 但 `status=error`
-  **不算抓取失败**（2026-09-05 修订）：服务端可达响应有效——provider
-  页归一 stale + ERR_Y 单行显 `error.code`、总览行级显 `err`，仅串口
-  `[usage] page status=error: <code>` 留痕（曾误转 FetchError 跳错误页，
-  "server error" 屏显无信息量，已废弃）。`do_fetch` 有
-  `except Exception` 兑底（`sys.print_exception` 串口 traceback）——
-  意外异常不再穿透杀死主循环。任何失败串口 `[usage]` 前缀打印详情
-  （fetch fail #N / ssr 下载失败 / ssr miss / png oom / wifi failed /
-  recovered）。错误单行与 RSSI 角标**同行分置**（ERR_Y=22：错误 x4..156
-  限 19 字符 / 角标 x164..228，左右不叠不互擦——曾错位叠字，2026-09-06
-  修）；RSSI 写屏统一 `draw_rssi`，页 full 重画后**立即原地补画**
-  （刷新期不再缺位秒级）。
-- **总览行级失败（2026-09-05）**：`items[].status=error` 的行（服务端
-  对无数据 plan/bundle 下发 `percent=0.0` 兑底）端侧屏蔽为无数据——
-  不画条/"0%"/倒计时，percent 槽（OV_PCT_X）画红 `err`；`status=stale`
-  行是真实旧值照常渲染。OverviewPage 补齐页面级 stale 徽标（无
-  updated_at 时纯 `stale`）+ ERR_Y 单行错误 + `set_error_keep`。
+- **错误模型（2026-09-05 定稿 + 2026-09-08 无状态化修订）**：状态徽标
+  只有两态 ok/stale（error 徽标删除——`STATUS_TEXT` 只剩 ok、
+  `_status_rgb` 缺省灰）。失败按 `loaded`（首次成功加载标志）分流：
+  **从未成功** → 独立错误页（`retry Ns` 倒计时 + **连续失败计数
+  `fail #N`**，单调递增证明循环活着在重试——同内容重试屏显无变化
+  看不出；成功归零）；**成功过** → `degrade_stale`：全部页（含总览）
+  标 stale 保留旧数据 + 页头下 ERR_Y ASCII 单行错误，当前页保持显示
+  不跳页。**服务端无状态化后 provider 页失败一律 503**（不再 200 +
+  status=error）：端侧非 200 → 解析 `error.code` 机器码作 FetchError
+  文本（client.py）→ 走上述统一失败路径——stale 徽标（用端侧上次
+  成功响应存的 `updated_at` 带年龄）+ ERR_Y 单行 + 时间条 wait 段
+  错误红**同步出现、同步消失**（恢复 200 → update 换 ok → sig 变 →
+  全量重画涂掉全部错误痕迹）。200 + `status=error` 仅剩 total=0 空
+  overview 防御（串口 `[usage] page status=error: <code>` 留痕）。
+  `do_fetch` 有 `except Exception` 兑底（`sys.print_exception` 串口
+  traceback）——意外异常不再穿透杀死主循环。任何失败串口 `[usage]`
+  前缀打印详情（fetch fail #N / ssr 下载失败 / ssr miss / png oom /
+  wifi failed / recovered）。错误单行与 RSSI 角标**同行分置**
+  （ERR_Y=22：错误 x4..156 限 19 字符 / 角标 x164..228，左右不叠不互擦
+  ——曾错位叠字，2026-09-06 修）；RSSI 写屏统一 `draw_rssi`，页 full
+  重画后**立即原地补画**（刷新期不再缺位秒级）；**fetch/SSR 期间由
+  `tl_frame` 帧回调接手**采集+重画（主循环阻塞在 socket/PNG 期间唯一
+  执行点就是 on_wait 切片回调——此前 RSSI 只在主循环采，fetching
+  数秒~十几秒角标冻结，2026-09-07 修）。
+- **总览行级失败（2026-09-05 + 2026-09-08）**：`items[].status=error`
+  的行（服务端对无数据 plan/bundle 下发 `percent=0.0` 兑底）端侧屏蔽
+  为无数据——不画条/"0%"/倒计时，percent 槽（OV_PCT_X）画红 `err`；
+  `status=stale` 行是真实旧值照常渲染。**overview 页面级恒 ok**（单
+  provider 失败只标该行，不整页降级）；OverviewPage 页面级 stale 徽标
+  + ERR_Y 单行错误只由端侧 `degrade_stale`（整页网络失败/503）触发，
+  且因服务端下发 `updated_at` 带年龄（2026-09-08）。
 
 ### 渲染责任边界（关键划分）
 
@@ -189,6 +201,14 @@ mpy-cross -o dst.mpy src.py       # 单文件交叉编译
     单窗 plan 如 qwen 谷价形态也走）：**一行 = caption 灰标签贴图
     （`距切换计价还剩：`）+ 两色倒计时**（peak 红 / offpeak 绿；
     `_LAYOUTS_PEAK` 有 1 档）。
+  - **档位布局防重叠（2026-09-09 定稿）**：**保留条下数额原布局**（数额
+    与标签同行右对齐的 inline 方案被否——SSR 贴图清除矩形整槽宽会把
+    同行数字盖掉）。行高需求 = bar_dy+bar_h+2+16，step 须 ≥ 需求；不足
+    只微调纵向几何（y0/step/条高/条上移），不用 inline：普通 3 行档
+    (54,50) 恰好相接；峰谷 3 行档 (64,46,12,16) 条高 14→12 + 条上移
+    bar_dy 18→16 换出间距（可用区 62..204 只 142px，3 行 50 放不下）；
+    峰谷 2 行档 step 54→56 补足。diff 路径 inline（4 行档）擦除按文本
+    实宽（旧固定区 x64..168 会擦掉标签贴图右半）。
   - **时段规则随 provider 驱动配置**（服务端 config `peak:` 段）：
     deepseek 缺省工作日 09:00–12:00、14:00–18:00；**qwen（通义灵码
     Token Plan Solo）谷价 = 每晚 22:00–次日 08:00**（北京时间 UTC+8
@@ -219,14 +239,18 @@ SSR 贴图、无 ASCII 回退，`_NAME_RGB` 死代码一并移除）。`usage_cf
 `page.set_palette()` 落模块常量（渲染处处动态读）+ 返回时间条
 (四色, 底色)；夜间检测切态时 `theme.set_night(night)` → 对应套落
 page + 返回新 (四色, 底色)，app 顺路 `timeline.set_palette()` 换条色
-+ **当前页 `swap_renders(night)`+`invalidate()` 重绘**（2026-09-06
-定稿：**零网络**——页对象 `_alt` 双套 hash 记忆库在 fetch 时顺路
-登记本套 hash，切态时各槽回填另一套记忆 hash，渲染直接读 rcache
-双套共存缓存，不 fetch 不下载不重渲染，时间条不走网络段周期相位
-不变；记忆缺失的槽置空等下轮平补。非当前页不管——翻到必先
-fetch 拿新夜态 hash 覆盖。未成功加载过（错误页/无页）无数据无贴图
-仅换色，错误页 `invalidate()` 整屏 fill 换夜底。新 hash 随下一个
-常规轮询自然到达）。
+page + 返回新 (四色, 底色)，app 顺路 `timeline.set_palette()` 换条色
++ **当前页 `swap_renders(night)`+`invalidate()` 重绘**（2026-09-07
+定稿：**双 hash 契约 + 切套仅 SSR**——主响应每槽双发两套 hash
+（`*_render` 当前套 + `*_render_alt` 对偶套，请求带 `alt*` 渲染参数；
+`render.check_alt` 拦缺 alt 的旧服务器，直接报错不静默兼容），
+`update(night=)` 同轮双登记进 `_alt`，切态回填另一套后渲染读
+rcache 双套共存缓存；**缺失贴图直接走 `/api/render/<hash>` 按需
+补下**（时间条当前相位后追加一段 ssr 增量走字、右标注 ssr 位
+继续走字完成后并入冻结），不碰 `/api/page` 不触发上游——数据刷新
+仍归常规轮询。非当前页不管——翻到必先 fetch 拿新夜态 hash 覆盖。
+未成功加载过（错误页/无页）无数据无贴图仅换色，错误页
+`invalidate()` 整屏 fill 换夜底）。
 **SSR 参数随夜态**：client.py `bg`/`theme` 从
 `theme.current_bg_hex(night)`/`current_theme(night)` 动态取
 （day `FFFFFF&theme=day` / night `000000&theme=night`）——贴图与页底
@@ -246,15 +270,22 @@ peak 红`梁文峰`、offpeak 绿`梁文谷`（服务端 SSR，色随 theme）�
 **夜态默认夜间（无 NVS 记忆）**：设备无 RTC，断电丢态——启动夜态
 恒为夜间默认 True；时钟校准前不按小时判（同夜态）。夜间检测切态时
 不再回写。
-**记住页（NVS，2026-09-01/02）**：同页连续手动刷新（中途无调暗、无换页）
+**记住页（NVS，2026-09-01/02/09）**：同页连续手动刷新（中途无调暗、无换页）
 达 `refresh_remember_n`（默认 3，`usage_cfg` 可配）次 → 记住当前页
-（**页码字符串 'N'**，key `usage_page` str，存取统一走
-`lib/board.py` 的 NVS 函数），下次开机 `restore_page`
+（**页码 i32**，key `usage_page`，存取统一走
+`lib/board.py` 的 NVS 函数——**必须 i32：真机实测本固件 NVS.set_str
+写入后 get_str 读回 None，str 从没落盘，功能形同虚设**，2026-09-09
+Thonny REPL 验证 `set_str→get_str=None`、`set_i32→get_i32=1`，故改存
+i32；i32 语义上也更贴合页码），下次开机 `restore_page`
 直接拉该页（fetch_page(序号)，服务端越界自动回卷）。记忆是**持久书签**：
 成功加载保留、每次开机都恢复；**清除时机**=开机加载失败（`do_fetch`
 失败分支）。连续计数在换页/进入调暗时清零（不清除已记书签）；计数
 只针对"非 dim、无换页"的手动刷新成功拉取（do_fetch 成功尾部结算，
-`manual_pending` 标记本帧手动刷新意图）。
+`manual_pending` 标记本帧手动刷新意图）。**fetch 期间到达的刷新键不清不吞**（2026-09-07
+修：曾按"重叠去重"在 do_fetch 成功尾部无条件清 flags.force_refresh，
+阻塞数秒的 fetch 窗口内按键被静默吞、计数永远凑不满 N，记住页功能
+形同虚设——坑 3"标志只有一份/读到 flags 再落局部"的违例；现保留
+标志到下一帧输入段正常消费，刷新+计数两不误）。
 
 ### overview 行名（易踩坑）
 
@@ -268,11 +299,11 @@ peak 红`梁文峰`、offpeak 绿`梁文谷`（服务端 SSR，色随 theme）�
 
 | 模块 | 职责 |
 |---|---|
-| `client.py` | 手写 socket 切片读 HTTP（替代 urequests，为驱动时间条动画）；`fetch_page(N)` 单端点；`server_base()` 推导 base |
-| `render.py` | `RenderStore`：hash→文件缓存、`png_dims`（宽+高）、`usable()`/`height()`、下载、上限淘汰、OOM 退避（error 不入 SSR） |
-| `page.py` | `ProviderPage`（配额 1..4 档 + balance/peak 稀疏/密集布局）、`OverviewPage`（含页面级 stale/错误行 + 行级 error 画红 err）、`ErrorPage`（单行 ASCII err + retrying... 点闪动 + fail #N 连续失败计数）；徽标两态 ok/stale；余额大字 = `lib/digits` 位图字体现场画（¥/$ 符号并入大字串同色）；总览余额行彩色 ASCII（币种码+金额）；Δ 显示（内存态）——`update(dark=)` 暗屏轮增量并入挂起 Δ（+2,+0.1,+0.5 → +3.6）不推进基准，退出暗屏强刷一次结算；`update(night=)` 顺路登记双套 hash 进 `_alt` 记忆库，`swap_renders(night)` 昼夜切槽回填另一套（rcache 直读零网络） |
-| `app.py` | 主状态机：WiFi、调度、页码游标翻页/换页 pending、夜景（启动态=默认夜间，无 NVS 记忆；切态=当前页 `swap_renders`+`invalidate` 零网络重绘，见 §5）、RSSI、SSR 队列；按响应 `type` 分发解析（overview/provider）；失败按 `loaded` 分流（未加载→错误页 / 已加载→`degrade_stale` 全页 stale）+ 连续失败计数 + `[usage]` 串口诊断 + `except Exception` 兑底 |
-| `timeline.py` | 底部时间条（相位型，满条=轮询周期；分段三态：主请求中整段 network 色增长，响应到达重排 network+upstream（upstream=服务端 timing，network=端侧实测主请求段−upstream 钳0——wait 不含传输不能直接用）+ssr 实时增长（端侧实测），**ssr 冻结后剩余段重涂 wait 色（等待下一轮，条底色）；请求出错 wait 段改涂错误红**；右标注恒三段带' s'尾同态流转（进行中=实时+0/0，下载中=前两段冻结+ssr 走字，完成全冻结），>10s 段自动降整秒防溢出；**失败也保持三段**（主请求段实测时长进 network、后两段 0.0——2026-08-31 定稿不再回退单段灰；仅总耗时 0 才灰单段）；左标注 fetching... 点闪动，**'retrying' 仅 SSR（次要 fetch）失败过才用**——sticky 置位、本轮内不翻回（render.download 任一尝试失败即 on_retry(True)，复位只在本轮完成 mark_fetch_done/下轮 begin_cycle；主请求失败后的延时重发仍显示 fetching——2026-09-06 定稿）；**标注行增量重绘**（2026-09-06 定稿：左=固定前缀不动只擦动态尾（动画点最多 3 字符），右=布局不变时只重画文本变化的段、斜杠与 ' s' 尾不动——整行擦写每次走字都闪，真机肉眼可见；布局变（阶段切换）才整块擦写一次） |
+| `client.py` | 手写 socket 切片读 HTTP（替代 urequests，为驱动时间条动画）；`fetch_page(N)` 单端点；请求随夜态带双套渲染参数（`bg/theme/fg…` + `alt*` 对偶套，双 hash 契约）；`server_base()` 推导 base |
+| `render.py` | `RenderStore`：hash→文件缓存、`png_dims`（宽+高）、`usable()`/`height()`、下载、上限淘汰、OOM 退避（error 不入 SSR）；`check_alt()` 双 hash 契约校验（缺 alt 即 FetchError） |
+| `page.py` | `ProviderPage`（配额 1..4 档 + balance/peak 稀疏/密集布局）、`OverviewPage`（含页面级 stale/错误行 + 行级 error 画红 err）、`ErrorPage`（单行 ASCII err + retrying... 点闪动 + fail #N 连续失败计数）；徽标两态 ok/stale；余额大字 = `lib/digits` 位图字体现场画（¥/$ 符号并入大字串同色）；总览余额行彩色 ASCII（币种码+金额）；Δ 显示（内存态）——`update(dark=)` 暗屏轮增量并入挂起 Δ（+2,+0.1,+0.5 → +3.6）不推进基准，退出暗屏强刷一次结算；`update(night=)` 同轮双登记双套 hash 进 `_alt` 记忆库，`swap_renders(night)` 昼夜切槽回填另一套 + `render_slots()` 枚举槽位（含槽宽，供切套按需补图） |
+| `app.py` | 主状态机：WiFi、调度、页码游标翻页/换页 pending、夜景（启动态=默认夜间，无 NVS 记忆；切态=当前页 `swap_renders`+按需补图，不碰数据端点，见 §5）、RSSI、SSR 队列；按响应 `type` 分发解析（overview/provider）；失败按 `loaded` 分流（未加载→错误页 / 已加载→`degrade_stale` 全页 stale）+ 连续失败计数 + `[usage]` 串口诊断 + `except Exception` 兑底 |
+| `timeline.py` | 底部时间条（相位型，满条=轮询周期；分段三态：主请求中整段 network 色增长，响应到达重排 network+upstream（upstream=服务端 timing，network=端侧实测主请求段−upstream 钳0——wait 不含传输不能直接用）+ssr 实时增长（端侧实测），**ssr 冻结后剩余段重涂 wait 色（等待下一轮，条底色）；请求出错 wait 段改涂错误红**；右标注恒三段带' s'尾同态流转（进行中=实时+0/0，下载中=前两段冻结+ssr 走字，完成全冻结），>10s 段自动降整秒防溢出；**失败也保持三段**（主请求段实测时长进 network、后两段 0.0——2026-08-31 定稿不再回退单段灰；仅总耗时 0 才灰单段）；左标注 fetching... 点闪动，**'retrying' 仅 SSR（次要 fetch）失败过才用**——sticky 置位、本轮内不翻回（render.download 任一尝试失败即 on_retry(True)，复位只在本轮完成 mark_fetch_done/下轮 begin_cycle；主请求失败后的延时重发仍显示 fetching——2026-09-06 定稿）；**标注行增量重绘**（2026-09-06 定稿：左=固定前缀不动只擦动态尾（动画点最多 3 字符），右=布局不变时只重画文本变化的段、斜杠与 ' s' 尾不动——整行擦写每次走字都闪，真机肉眼可见；布局变（阶段切换）才整块擦写一次）；**切套补下载追加段**（2026-09-07：`begin_extra()/extra_done()`——冻结 wait 相位中途追加一段 ssr 增量走字，wait 起点后移/从段尾续铺，相位锚点不动；右标注 ssr 位=冻结值+追加实时，完成后并入重新冻结） |
 | （已移除）demo.py | 端侧假数据源已删除——demo 改在服务端（`llm-usage-server/usage/demo.py`：按 providers[] 合成 + 延迟注入） |
 | `activity.py` / `power.py` | 加速度计唤醒（INT1 中断 + 引脚电平哨兵）/ 背光调暗 |
 

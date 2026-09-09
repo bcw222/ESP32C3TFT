@@ -8,7 +8,9 @@
   按 id 复用页对象保留增量渲染状态；失败按 loaded（首次成功加载
   标志）分流：从未成功 → 独立错误页（retry Ns + 连续失败计数
   fail #N，证明循环活着在重试）；成功过 → 全部页标 stale 保留旧
-  数据 + 页头下 ASCII 单行错误（当前页保持显示，不跳页）
+  数据 + 页头下 ASCII 单行错误（当前页保持显示，不跳页）。
+  服务端无状态化（2026-09-08）：provider 页失败一律 503 + error.code
+  ——端侧非 200 走此分流，stale 徽标/ERR_Y/wait 红三件同步出现消失
 - 诊断：任何失败串口 [usage] 前缀打印（fail #N 计数、SSR 下载失败、
   意外异常 traceback、wifi failed、recovered）；do_fetch 有
   except Exception 兑底——意外异常不穿透杀死主循环
@@ -42,7 +44,7 @@ from .activity import ActivityMonitor
 from .page import ErrorPage, OverviewPage, ProviderPage, NAME_MAX
 from .power import Backlight, resolve_levels
 from .timeline import Timeline
-from lib.board import nvs_erase, nvs_get_str, nvs_set_str
+from lib.board import nvs_erase, nvs_get_i32, nvs_set_i32
 from lib.utils import ClickDetector
 from lib.wlanman import WlanManager
 
@@ -50,7 +52,10 @@ _TICK_MS = 1     # 动态补睡下限：帧耗时超过 target 时至少让 1ms
 # 错误页游标（2026-09-02）：error_page 是独立兑底态不进 pages，
 # cursor == ERR_CURSOR 时显示错误页；正常页游标恒 >= 0
 ERR_CURSOR = -1
-# 记住页 NVS key（存取统一走 lib/board.py 的 NVS 函数）
+# 记住页 NVS key（存取统一走 lib/board.py 的 NVS 函数）。
+# 2026-09-09：**存 i32 不存 str**——真机实测本固件 NVS.set_str 写入
+# 后 get_str 读回 None（set_str 内部异常被静默吞，页码从未落盘），
+# i32 读写回路正常；页码是非负整数，语义上 i32 更贴合。
 _NVS_PAGE = 'usage_page'
 
 
@@ -292,16 +297,12 @@ def run(board, networks, cfg):
     flags = _Flags()
 
     # 记住页（NVS）：同页连续手动刷新（中途无 dim、无换页）达
-    # refresh_remember_n 次 → 记住当前页（页码字符串 'N'），下次开机
-    # 直接转到它。restore_page = 启动时从 NVS 读到的页码；restoring =
-    # 本次启动待"加载记忆页"：成功加载保留记忆（每次开机都恢复），
-    # 加载失败才清除。
+    # refresh_remember_n 次 → 记住当前页（页码 i32），下次开机直接转
+    # 到它。restore_page = 启动时从 NVS 读到的页码；restoring = 本次
+    # 启动待"加载记忆页"：成功加载保留记忆（每次开机都恢复），加载
+    # 失败才清除。
     remember_n = max(int(cfg.get('refresh_remember_n', 3)), 1)
-    restore_key = nvs_get_str(_NVS_PAGE)
-    try:
-        restore_page = int(restore_key) if restore_key is not None else None
-    except (TypeError, ValueError):
-        restore_page = None
+    restore_page = nvs_get_i32(_NVS_PAGE)
     restoring = restore_page is not None
     refresh_count = 0        # 同页连续手动刷新计数
     manual_pending = False   # 本帧手动刷新键已按下、待 do_fetch 结算
@@ -340,6 +341,23 @@ def run(board, networks, cfg):
                          - len(rssi_value) * 8, 22,
                          page._col(page._CAPTION_RGB), page.BG())
         rssi_drawn = rssi_value
+
+    def rssi_poll(now):
+        """RSSI 5s 采集一拍 + 差异重画（主循环与 fetch 帧回调共用）。"""
+        nonlocal next_rssi_poll, rssi_value
+        if time.ticks_diff(now, next_rssi_poll) >= 0:
+            next_rssi_poll = time.ticks_add(now, 5_000)
+            rssi_value = _read_rssi(wlan, now)
+        draw_rssi()
+
+    def tl_frame():
+        """fetch/SSR 期间的帧回调：时间条动画 + RSSI 采集/重画。
+        主循环阻塞在 socket 切片读/PNG 解码期间只有这里被执行——
+        此前 RSSI 采集与重画只在主循环做，一轮 fetch 数秒~十几秒
+        期间角标数值冻结不刷新（2026-09-07 修）。"""
+        rssi_poll(time.ticks_ms())
+        timeline.draw(display)
+
     force_refresh = True            # 开机立即抓一轮
     was_dim = False
 
@@ -486,16 +504,16 @@ def run(board, networks, cfg):
         widths = dict(want)
         missing = store.missing(list(widths))
         _paint_current()
-        timeline.draw(display)
+        tl_frame()
         t0 = time.ticks_ms()
         had_fail = False
         for h in missing:
             try:
-                store.download(h, on_wait=lambda: timeline.draw(display),
+                store.download(h, on_wait=tl_frame,
                                slot_w=widths[h],
                                on_retry=timeline.set_retrying)
                 _paint_current()
-                timeline.draw(display)
+                tl_frame()
             except client.FetchError as exc:
                 had_fail = True     # 单张失败不中断，槽空等下轮；wait 红
                 print('[usage] ssr {} fail: {}'.format(h, exc))
@@ -532,16 +550,16 @@ def run(board, networks, cfg):
                 tgt = (restore_page if restoring and restore_page is not None
                        else 0)
             data = client.fetch_page(
-                server_cfg, tgt,
-                on_wait=lambda: timeline.draw(display),
+                server_cfg, tgt, on_wait=tl_frame,
                 night=page_night)
             _sync_clock(data)
-            # 服务器 200 + status=error（SCHEMA：上游失败且无
-            # last-known-good）：**不是抓取失败**——服务端可达、响应
-            # 有效，照常渲染（provider 页归一 stale + ERR_Y 单行显
-            # error.code；总览行级 'err'），仅串口留痕。（2026-09-05
-            # 修订：曾误转 FetchError 跳错误页，"server error" 屏显
-            # 无信息量——总览聚合 error 更不该整页炸掉）
+            render.check_alt(data)   # 双 hash 契约：缺 alt 即报错（旧服务器不兼容）
+            # 200 + 顶层 status=error：无状态化（2026-09-08）后仅剩
+            # total=0 的空 overview（无 provider，配置错误）会走这里——
+            # total=0 下方即 raise，实际到不了渲染。overview 正常聚合
+            # 页面级恒 ok、单 provider 失败只标行级 error（红 err），
+            # provider 页失败已是 503 走 FetchError 失败路径（degrade_stale
+            # 三件同步）。此处仅串口留痕作防御。
             if str(data.get('status') or '') == 'error':
                 err = data.get('error')
                 code = (err.get('code') if isinstance(err, dict)
@@ -607,22 +625,26 @@ def run(board, networks, cfg):
             error_page.set_fails(0)
             # 手动刷新计数结算：本帧手动刷新（非 dim、非换页）已成功
             # 拉取 → 同页连续计数 +1，达到 refresh_remember_n 次即记住
-            # 当前页（页码字符串），下次开机直接转到它。换页/进入调暗
-            # 会把计数清零（见输入/调暗段）。
+            # 当前页（页码 i32，见 _NVS_PAGE 注释——set_str 真机写不
+            # 进，改存 i32），下次开机直接转到它。换页/进入调暗会把
+            # 计数清零（见输入/调暗段）。
             if manual and not dim and cursor != ERR_CURSOR:
                 refresh_count += 1
                 if refresh_count >= remember_n:
-                    nvs_set_str(_NVS_PAGE, str(cursor))
+                    nvs_set_i32(_NVS_PAGE, cursor)
             # 开机恢复记忆页落地：restoring 时本次 do_fetch 成功——记忆
             # 页是页码，_resize 已按 total 对齐、do_switch 已切过去
             # （能走到成功尾部即恢复完成）。记忆**保留**：每次开机都
             # 恢复它，仅开机加载失败才清除（见下失败分支）。
             if restoring:
                 restoring = False
-            # 重叠去重：fetch 期间按下的强刷在此消费——数据刚刷新，
-            # 不再冗余地立即重刷一轮（换页意图不消费，照常在下一帧
-            # 为新目标页发起换页 fetch；轮询到期由 due() 照常续拍）。
-            flags.force_refresh = False
+            # 注意：这里**不**清 flags.force_refresh（曾经的"重叠去重"，
+            # 2026-09-07 删）：do_fetch 阻塞数秒~十几秒，期间按下的刷新
+            # 键被尾部无条件清掉即被静默吞——既不刷新也进不了
+            # manual_pending，连续手动刷新计数永远凑不满 refresh_remember_n，
+            # 记住页功能形同虚设（坑 3"标志只有一份"的违例）。保留标志
+            # 让它在下一帧输入段正常消费：刷新 + 计数两不误；fetch 串行
+            # 执行，连按只是排队逐轮拉，无风暴。
         except client.FetchError as exc:
             timeline.mark_fetch_done(error=True)
             pending_page = None
@@ -705,12 +727,13 @@ def run(board, networks, cfg):
 
         # ---- 夜间模式（分钟粒度检测；昼夜两套全量配色整体切换：
         # page 落色 + 时间条换四色/底色 + 当前页贴图槽换套 +
-        # backlight 换夜间档。**零网络**（2026-09-06 定稿）：贴图按
-        # hash 寻址、rcache 双套共存——当前页各槽换另一套的记忆 hash
-        # 后渲染直接读本地缓存，不 fetch 不下载（时间条不走网络段，
-        # 周期相位不变）；记忆缺失的槽置空等下轮平补。未成功加载过
-        # （错误页/无页）时无数据无贴图，仅换色。新 hash 随下一个
-        # 常规轮询自然到达（fetch 请求参数随 page_night 动态取）----
+        # backlight 换夜间档。**仅 SSR，零数据请求**（2026-09-07
+        # 定稿）：主响应每槽双发两套 hash（*_render + *_render_alt），
+        # swap_renders 回填另一套后渲染直接读 rcache 双套共存缓存；
+        # 缺失贴图直接走 /api/render/<hash> 按需补下（时间条在当前
+        # 相位后追加一段 ssr 增量走字，右标注 ssr 位继续走字），不碰
+        # /api/page、不触发上游——数据刷新仍归常规轮询。未成功加载过
+        # （错误页/无页）无数据无贴图，仅换色 ----
         if time.ticks_diff(now, next_night_check) >= 0:
             next_night_check = time.ticks_add(now, 60_000)
             # 时钟未校准（无 RTC，time.time()≈0）时 _is_night 不可信：
@@ -729,15 +752,34 @@ def run(board, networks, cfg):
                 if cur is not None:
                     cur.swap_renders(night)  # 贴图槽换另一套 hash
                     cur.invalidate()         # 全量重画（换色+换图）
+                    # 按需补下：枚举槽位（带 ?w= 槽宽）查盘，缺哪张
+                    # 下载哪张；下载失败槽空下轮自愈（[usage] 留痕）
+                    widths = {}
+                    for h, w in cur.render_slots():
+                        if h and w > widths.get(h, 0):
+                            widths[h] = w
+                    missing = store.missing(list(widths))
+                    if missing:
+                        timeline.begin_extra()
+                        for h in missing:
+                            try:
+                                store.download(
+                                    h,
+                                    on_wait=lambda: timeline.draw(display),
+                                    slot_w=widths[h])
+                                _paint_current()
+                            except client.FetchError as exc:
+                                print('[usage] ssr {} fail: {}'.format(
+                                    h, exc))
+                        timeline.extra_done()
+                        _paint_current()
                 elif cursor == ERR_CURSOR:
                     error_page.invalidate()  # 错误页整屏 fill 换夜底
 
         # ---- RSSI 角标：5s 采集一拍；写屏统一走 draw_rssi（值未变
-        # 零操作；页 full 重画后已由 _paint_current 立即补画）----
-        if time.ticks_diff(now, next_rssi_poll) >= 0:
-            next_rssi_poll = time.ticks_add(now, 5_000)
-            rssi_value = _read_rssi(wlan, now)
-        draw_rssi()
+        # 零操作；页 full 重画后已由 _paint_current 立即补画；
+        # fetch/SSR 期间由 tl_frame 帧回调接手，不再冻结）----
+        rssi_poll(now)
 
         # ---- 渲染（增量：无变化时零绘制操作）----
         _paint_current()
