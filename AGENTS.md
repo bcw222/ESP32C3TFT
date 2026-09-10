@@ -146,13 +146,16 @@ mpy-cross -o dst.mpy src.py       # 单文件交叉编译
   `tl_frame` 帧回调接手**采集+重画（主循环阻塞在 socket/PNG 期间唯一
   执行点就是 on_wait 切片回调——此前 RSSI 只在主循环采，fetching
   数秒~十几秒角标冻结，2026-09-07 修）。
-- **总览行级失败（2026-09-05 + 2026-09-08）**：`items[].status=error`
-  的行（服务端对无数据 plan/bundle 下发 `percent=0.0` 兑底）端侧屏蔽
-  为无数据——不画条/"0%"/倒计时，percent 槽（OV_PCT_X）画红 `err`；
-  `status=stale` 行是真实旧值照常渲染。**overview 页面级恒 ok**（单
+- **总览行级失败（2026-09-05 + 2026-09-08 + 2026-09-09 定稿）**：
+  行级状态**只两态 ok/error**——stale 永远是整页级的（服务端无状态化
+  后行级不产 stale，端侧收到也归一 ok 防御、不屏蔽数据）。
+  `items[].status=error` 的行（服务端对无数据 plan/bundle 下发
+  `percent=0.0` 兑底）端侧屏蔽为无数据——不画条/"0%"/倒计时，
+  percent 槽（OV_PCT_X）画红 `err`。**overview 页面级恒 ok**（单
   provider 失败只标该行，不整页降级）；OverviewPage 页面级 stale 徽标
-  + ERR_Y 单行错误只由端侧 `degrade_stale`（整页网络失败/503）触发，
-  且因服务端下发 `updated_at` 带年龄（2026-09-08）。
+  + ERR_Y 单行错误只由端侧 `degrade_stale`（整页网络失败/503）触发
+  （行渲染靠行级 status 回退页面级保留旧值），且因服务端下发
+  `updated_at` 带年龄（2026-09-08）。
 
 ### 渲染责任边界（关键划分）
 

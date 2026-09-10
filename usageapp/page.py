@@ -1130,7 +1130,12 @@ class OverviewPage:
                 percent = None      # 余额行：无百分比语义
             amt = item.get('amount')
             amt = '' if amt is None else str(amt)[:_AMT_CHAR_N]
-            stat = str(item.get('status') or '')
+            # 行级只两态 ok/error（2026-09-09 定稿）：stale 永远是整页
+            # 级（degrade_stale 传播，走下方 stat or self.status 回退）
+            # ——服务端无状态化后行级不产 stale，收到也归一 ok 不屏蔽
+            # 数据（纯防御）
+            stat = ('error'
+                    if str(item.get('status') or '') == 'error' else '')
             if stat == 'error':
                 # 行级上游失败且无历史（服务端对无数据 plan/bundle 下发
                 # percent=0.0 兜底靠 status 显异常）：端侧屏蔽为无数据，

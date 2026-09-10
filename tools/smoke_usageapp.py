@@ -319,20 +319,26 @@ def main():
     assert 'HTTP 502 x' in d.texts
     assert 'stale' in d.texts
 
-    # 总览行级 error（2026-09-05）：屏蔽服务端 percent=0.0 兑底——
-    # 画红 'err'，绝不渲染虚假 0%；stale 行真实旧值照常
+    # 总览行级 error（2026-09-05 + 2026-09-09 定稿：行级只两态
+    # ok/error，stale 永远是整页级）：屏蔽服务端 percent=0.0 兑底——
+    # 画红 'err'，绝不渲染虚假 0%；行级 stale（服务端已不产，纯防御）
+    # 归一 ok 照常渲染旧值
     d2 = FakeDisplay()
     ov3 = page.OverviewPage()
     ov3.update({'status': 'ok', 'items': [
         {'id': 'bad', 'kind': 'plan', 'percent': 0.0, 'status': 'error'},
         {'id': 'old', 'kind': 'plan', 'percent': 33.0, 'status': 'stale'},
     ]})
-    assert ov3.rows[0][1] is None and ov3.rows[0][3] == ''    # 已屏蔽
-    assert ov3.rows[1][1] == 33.0                             # stale 保留
+    assert ov3.rows[0][1] is None and ov3.rows[0][3] == ''    # error 已屏蔽
+    assert ov3.rows[1][1] == 33.0             # 行级 stale 归一 ok：旧值保留
+    assert ov3.rows[1][7] == 'ok'             # 行级 status 只剩 error；空则
+    #                                           回退页面级（ok/stale 传播）
     ov3.render(d2, f, now, rstore)
     assert '0%' not in d2.texts
     assert 'err' in d2.texts
     assert '33%' in d2.texts
+    # 整页级 stale 传播（degrade_stale）不受影响：行级 status 空 →
+    # 回退页面级 stale，行照常画旧值（上面的 ov2 已验徽标 + ERR_Y）
 
     # 错误页连续失败计数（2026-09-05）：fail #N 单调递增（证明在重试）
     ep3 = page.ErrorPage()
