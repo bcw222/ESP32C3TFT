@@ -62,6 +62,22 @@ mpy-cross -o dst.mpy src.py       # 单文件交叉编译
   render 端点发图前 sleep 模拟大图下载——SSR 分段仍由端侧实测，
   服务端不回传该值），用于本地/无凭据调端侧界面；端侧无假数据开关。
 
+### 服务端日志（2026-09-10 统一 logging）
+
+llm-usage-server 全项目日志改标准库 `logging`（此前裸 print 混流）：
+- 模块 logger：`usage.http`/`usage.cache`/`usage.confwatch`/`usage.console`/
+  `usage.model`/`usage.render`，格式
+  `[YYYY-MM-DD HH:MM:SS] [LEVEL] [logger] msg`，根 handler 走 stderr，
+  `main.py` 启动时 `setup_logging()` 统一配置（`usage/logging_setup.py`）。
+- 配置热重载日志（confwatch.py）：成功 `config reloaded: N provider(s),
+  auth key from …`（INFO）；失败 `config reload failed: … (keeping
+  previous config)`（ERROR，同 mtime 去重）；immutable 键（listen/port）
+  变更 `… restart to apply`（WARNING）。
+- 上游：`upstream <pid>: OK/FAIL/EXC in Xs`（OK=INFO，FAIL/EXC=ERROR）；
+  凭据失效提醒 `[credentials] …`（WARNING，console.py 去重）。
+- CLI 工具（probe/qwen_probe/dump_renders）保留 print 输出（stdout
+  即机器可读结果），probe FAILED 走 stderr。
+
 ---
 
 ## 4. 硬件约束（不可违背）
@@ -90,7 +106,8 @@ mpy-cross -o dst.mpy src.py       # 单文件交叉编译
 |---|---|---|---|
 | `GET /api/page?page=N` | 当前页数据：`type`(overview/provider) + `total`/`page` + 页内容 | Bearer | h/bg/theme |
 | `GET /api/render/<hash>` | 贴图本体 PNG | Bearer | —（可带 ?w= 只读校验） |
-| `GET /healthz` | 存活 | 无 | — |
+| `GET /api/render_text/<hash>` | hash 反查贴图原文 JSON（2026-09-16 可选扩展，webui 专用：能原生排版文字的消费端免 PNG；端侧不用不受影响） | Bearer | — |
+| `GET /healthz` | 存活 | Bearer | — |
 
 - **页表在服务端**：`page=0` = overview 页（仅多 provider 时存在），
   其余 = providers 配置顺序逐页；`total` = 页数。**越界回卷**（服务端
