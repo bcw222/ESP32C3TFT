@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@main
+      with:
+        python-version: '3.12'
+
+    - name: Install mpy-cross
+      run: pip install mpy-cross
+
+    - name: Make gendist.sh executable
+      run: chmod +x gendist.sh
+      continue-on-error: true
+
+    - name: Run gendist.sh
+      run: ./gendist.sh
+
+    - name: Pack dist
+      run: |
+        cd dist
+        tar -czf ../dist.tar.gz .
+
+    - name: Create release
+      uses: actions/release@v2
+      with:
+        tag_name: ${{ forgejo.ref_name }}
+        title: ${{ forgejo.ref_name }}
+        files: dist.tar.gz
+        token: ${{ forgejo.token }}
