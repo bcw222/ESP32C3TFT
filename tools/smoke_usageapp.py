@@ -61,16 +61,20 @@ class FakeDisplay:
         self.calls = 0
         self.pngs = []
         self.texts = []
+        self.texts_xy = []     # (s, x, y)：行末槽 err/倒计时定位断言用
+        self.rects = []        # (x, y, w, h, c)：条绘制断言用
 
     def fill(self, c):
         self.calls += 1
 
     def fill_rect(self, x, y, w, h, c):
+        self.rects.append((x, y, w, h, c))
         self.calls += 1
 
     def text(self, font, s, x, y, c=None, bg=None):
         assert isinstance(s, str), 'text() 收到非字符串: {!r}'.format(s)
         self.texts.append(s)
+        self.texts_xy.append((s, x, y))
         self.calls += 1
 
     def write(self, font, s, x, y, c=None, bg=None):
@@ -320,8 +324,8 @@ def main():
     assert 'stale' in d.texts
 
     # 总览行级 error（2026-09-05 + 2026-09-09 定稿：行级只两态
-    # ok/error，stale 永远是整页级）：屏蔽服务端 percent=0.0 兑底——
-    # 画红 'err'，绝不渲染虚假 0%；行级 stale（服务端已不产，纯防御）
+    # ok/error，stale 永远是整页级）：无旧值（首拉即失败）屏蔽服务端
+    # percent=0.0 兑底为无数据；行级 stale（服务端已不产，纯防御）
     # 归一 ok 照常渲染旧值
     d2 = FakeDisplay()
     ov3 = page.OverviewPage()
@@ -337,8 +341,69 @@ def main():
     assert '0%' not in d2.texts
     assert 'err' in d2.texts
     assert '33%' in d2.texts
+    assert ('err', 208, 56) in d2.texts_xy    # 行末槽（顶掉时间显示）
     # 整页级 stale 传播（degrade_stale）不受影响：行级 status 空 →
     # 回退页面级 stale，行照常画旧值（上面的 ov2 已验徽标 + ERR_Y）
+
+    # 行级 error stale（2026-09-17 定稿）：同 id 有上一轮数据 → 复用
+    # 旧值照常渲染（条+百分比），红 'err' 只顶掉行末时间显示
+    d3 = FakeDisplay()
+    ov4 = page.OverviewPage()
+    ov4.update({'status': 'ok', 'items': [
+        {'id': 'glm', 'kind': 'plan', 'percent': 50.0,
+         'reset_at': now + 3600},
+    ]})
+    ov4.render(d3, f, now, rstore)
+    assert ('1h', 216, 56) in d3.texts_xy     # 基线：倒计时在行末槽
+    ov4.update({'status': 'ok', 'items': [
+        {'id': 'glm', 'kind': 'plan', 'percent': 0.0, 'status': 'error'},
+    ]})
+    assert ov4.rows[0][1] == 50.0             # 旧值复用（不渲染虚假 0%）
+    assert ov4.rows[0][6] is None             # reset_at 不复用（槽让给 err）
+    assert ov4.rows[0][7] == 'error'
+    n_t = len(d3.texts)
+    n_xy = len(d3.texts_xy)
+    n_rc = len(d3.rects)
+    ov4.render(d3, f, now + 1, rstore)        # sig 变 → 全量重画
+    assert '50%' in d3.texts[n_t:]            # 旧百分比照常
+    assert ('err', 208, 56) in d3.texts_xy[n_xy:]     # 行末槽红 err
+    assert ('1h', 216, 56) not in d3.texts_xy[n_xy:]  # 时间被顶掉
+    assert any(r[:4] == (96, 59, 64, 10)      # 条照画：track 整槽矩形
+               for r in d3.rects[n_rc:])
+    n_t = len(d3.texts)
+    n_xy = len(d3.texts_xy)
+    ov4.render(d3, f, now + 2, rstore)        # diff：err/50% 恒定零重画
+    assert len(d3.texts) == n_t
+    assert len(d3.texts_xy) == n_xy
+    # 恢复：error → ok → err 消失、倒计时回来（sig 变 → 全量重画）
+    n_t = len(d3.texts)
+    n_xy = len(d3.texts_xy)
+    ov4.update({'status': 'ok', 'items': [
+        {'id': 'glm', 'kind': 'plan', 'percent': 51.0,
+         'reset_at': now + 7200},
+    ]})
+    ov4.render(d3, f, now + 3, rstore)
+    assert ('err', 208, 56) not in d3.texts_xy[n_xy:]
+    assert ('2h', 216, 56) in d3.texts_xy[n_xy:]      # 倒计时回来
+    assert '51%' in d3.texts[n_t:]
+
+    # 余额行 error：金额左对齐条起点照常显示，err 在行末槽顶掉时间
+    d4 = FakeDisplay()
+    ov5 = page.OverviewPage()
+    ov5.update({'status': 'ok', 'items': [
+        {'id': 'ds', 'kind': 'balance', 'currency': 'CNY',
+         'amount': '110.5'},
+    ]})
+    ov5.render(d4, f, now, rstore)
+    assert ('CNY 110.5', 96, 56) in d4.texts_xy       # 基线：左对齐条起点
+    ov5.update({'status': 'ok', 'items': [
+        {'id': 'ds', 'kind': 'balance', 'status': 'error'},
+    ]})
+    assert ov5.rows[0][1] is None and ov5.rows[0][3] == '110.5'  # 旧值复用
+    n_xy = len(d4.texts_xy)
+    ov5.render(d4, f, now + 1, rstore)        # sig 变 → 全量重画
+    assert ('err', 208, 56) in d4.texts_xy[n_xy:]     # 行末槽红 err
+    assert ('CNY 110.5', 96, 56) in d4.texts_xy[n_xy:]  # 金额照画（左端）
 
     # 错误页连续失败计数（2026-09-05）：fail #N 单调递增（证明在重试）
     ep3 = page.ErrorPage()

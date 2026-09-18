@@ -61,6 +61,9 @@ mpy-cross -o dst.mpy src.py       # 单文件交叉编译
   （upstream_ms 进 timing.upstream；network_ms 进 wait；ssr_ms 在
   render 端点发图前 sleep 模拟大图下载——SSR 分段仍由端侧实测，
   服务端不回传该值），用于本地/无凭据调端侧界面；端侧无假数据开关。
+  `demo.fail_after_first: true` = 每个 provider 首次抓取必然成功、
+  之后必然失败（2026-09-18 加）——真机调试总览行级 stale（行末红
+  err + 旧值复用）与 provider 页 503 失败路径；热重载/重启即重置。
 
 ### 服务端日志（2026-09-10 统一 logging）
 
@@ -163,15 +166,19 @@ llm-usage-server 全项目日志改标准库 `logging`（此前裸 print 混流�
   `tl_frame` 帧回调接手**采集+重画（主循环阻塞在 socket/PNG 期间唯一
   执行点就是 on_wait 切片回调——此前 RSSI 只在主循环采，fetching
   数秒~十几秒角标冻结，2026-09-07 修）。
-- **总览行级失败（2026-09-05 + 2026-09-08 + 2026-09-09 定稿）**：
+- **总览行级失败（2026-09-05 + 2026-09-08 + 2026-09-09 定稿；
+  2026-09-17 改行级 stale，2026-09-18 金额左对齐条起点）**：
   行级状态**只两态 ok/error**——stale 永远是整页级的（服务端无状态化
   后行级不产 stale，端侧收到也归一 ok 防御、不屏蔽数据）。
-  `items[].status=error` 的行（服务端对无数据 plan/bundle 下发
-  `percent=0.0` 兑底）端侧屏蔽为无数据——不画条/"0%"/倒计时，
-  percent 槽（OV_PCT_X）画红 `err`。**overview 页面级恒 ok**（单
-  provider 失败只标该行，不整页降级）；OverviewPage 页面级 stale 徽标
-  + ERR_Y 单行错误只由端侧 `degrade_stale`（整页网络失败/503）触发
-  （行渲染靠行级 status 回退页面级保留旧值），且因服务端下发
+  `items[].status=error` 的行 = **行级 stale**：屏蔽服务端 `percent=0.0`
+  兑底值后，同 id 有上一轮数据就**复用旧值**（条/百分比/金额照常渲染，
+  绝不显示虚假 0%），红 `err` 只画在**行末槽**（AMT_RIGHT 右对齐，只
+  顶掉时间显示——reset_at 不复用；余额金额左对齐条起点 BAR_X，与
+  err 各占一端不冲突）；无历史（首拉即失败）才归无数据（仅行末
+  err）。**overview 页面级恒 ok**
+  （单 provider 失败只标该行，不整页降级）；OverviewPage 页面级 stale
+  徽标 + ERR_Y 单行错误只由端侧 `degrade_stale`（整页网络失败/503）
+  触发（行渲染靠行级 status 回退页面级保留旧值），且因服务端下发
   `updated_at` 带年龄（2026-09-08）。
 
 ### 渲染责任边界（关键划分）
@@ -321,7 +328,7 @@ i32；i32 语义上也更贴合页码），下次开机 `restore_page`
 |---|---|
 | `client.py` | 手写 socket 切片读 HTTP（替代 urequests，为驱动时间条动画）；`fetch_page(N)` 单端点；请求随夜态带双套渲染参数（`bg/theme/fg…` + `alt*` 对偶套，双 hash 契约）；`server_base()` 推导 base |
 | `render.py` | `RenderStore`：hash→文件缓存、`png_dims`（宽+高）、`usable()`/`height()`、下载、上限淘汰、OOM 退避（error 不入 SSR）；`check_alt()` 双 hash 契约校验（缺 alt 即 FetchError） |
-| `page.py` | `ProviderPage`（配额 1..4 档 + balance/peak 稀疏/密集布局）、`OverviewPage`（含页面级 stale/错误行 + 行级 error 画红 err）、`ErrorPage`（单行 ASCII err + retrying... 点闪动 + fail #N 连续失败计数）；徽标两态 ok/stale；余额大字 = `lib/digits` 位图字体现场画（¥/$ 符号并入大字串同色）；总览余额行彩色 ASCII（币种码+金额）；Δ 显示（内存态）——`update(dark=)` 暗屏轮增量并入挂起 Δ（+2,+0.1,+0.5 → +3.6）不推进基准，退出暗屏强刷一次结算；`update(night=)` 同轮双登记双套 hash 进 `_alt` 记忆库，`swap_renders(night)` 昼夜切槽回填另一套 + `render_slots()` 枚举槽位（含槽宽，供切套按需补图） |
+| `page.py` | `ProviderPage`（配额 1..4 档 + balance/peak 稀疏/密集布局）、`OverviewPage`（含页面级 stale/错误行 + 行级 error=stale：旧值复用、行末红 err）、`ErrorPage`（单行 ASCII err + retrying... 点闪动 + fail #N 连续失败计数）；徽标两态 ok/stale；余额大字 = `lib/digits` 位图字体现场画（¥/$ 符号并入大字串同色）；总览余额行彩色 ASCII（币种码+金额，左对齐条起点 BAR_X）；Δ 显示（内存态）——`update(dark=)` 暗屏轮增量并入挂起 Δ（+2,+0.1,+0.5 → +3.6）不推进基准，退出暗屏强刷一次结算；`update(night=)` 同轮双登记双套 hash 进 `_alt` 记忆库，`swap_renders(night)` 昼夜切槽回填另一套 + `render_slots()` 枚举槽位（含槽宽，供切套按需补图） |
 | `app.py` | 主状态机：WiFi、调度、页码游标翻页/换页 pending、夜景（启动态=默认夜间，无 NVS 记忆；切态=当前页 `swap_renders`+按需补图，不碰数据端点，见 §5）、RSSI、SSR 队列；按响应 `type` 分发解析（overview/provider）；失败按 `loaded` 分流（未加载→错误页 / 已加载→`degrade_stale` 全页 stale）+ 连续失败计数 + `[usage]` 串口诊断 + `except Exception` 兑底 |
 | `timeline.py` | 底部时间条（相位型，满条=轮询周期；分段三态：主请求中整段 network 色增长，响应到达重排 network+upstream（upstream=服务端 timing，network=端侧实测主请求段−upstream 钳0——wait 不含传输不能直接用）+ssr 实时增长（端侧实测），**ssr 冻结后剩余段重涂 wait 色（等待下一轮，条底色）；请求出错 wait 段改涂错误红**；右标注恒三段带' s'尾同态流转（进行中=实时+0/0，下载中=前两段冻结+ssr 走字，完成全冻结），>10s 段自动降整秒防溢出；**失败也保持三段**（主请求段实测时长进 network、后两段 0.0——2026-08-31 定稿不再回退单段灰；仅总耗时 0 才灰单段）；左标注 fetching... 点闪动，**'retrying' 仅 SSR（次要 fetch）失败过才用**——sticky 置位、本轮内不翻回（render.download 任一尝试失败即 on_retry(True)，复位只在本轮完成 mark_fetch_done/下轮 begin_cycle；主请求失败后的延时重发仍显示 fetching——2026-09-06 定稿）；**标注行增量重绘**（2026-09-06 定稿：左=固定前缀不动只擦动态尾（动画点最多 3 字符），右=布局不变时只重画文本变化的段、斜杠与 ' s' 尾不动——整行擦写每次走字都闪，真机肉眼可见；布局变（阶段切换）才整块擦写一次）；**切套补下载追加段**（2026-09-07：`begin_extra()/extra_done()`——冻结 wait 相位中途追加一段 ssr 增量走字，wait 起点后移/从段尾续铺，相位锚点不动；右标注 ssr 位=冻结值+追加实时，完成后并入重新冻结） |
 | （已移除）demo.py | 端侧假数据源已删除——demo 改在服务端（`llm-usage-server/usage/demo.py`：按 providers[] 合成 + 延迟注入） |
