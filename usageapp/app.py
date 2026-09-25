@@ -474,6 +474,17 @@ def run(board, networks, cfg):
             return 0            # 错误页重试：从首页拉，拿 total 定序列
         return cursor
 
+    def _fail_switch():
+        """换页 fetch 失败：目标页照常落为当前页（cursor 前移）。
+        否则目标被丢弃、cursor 不动，下一记上键 (cursor+1)%total 又
+        指回同一页——该页持续 erroring 时永远翻不过去（2026-09-26
+        owner 报「一页卡住没法翻页」）。仅 loaded（成功加载过）生效：
+        首拉失败走独立错误页兜底（cursor 归 ERR_CURSOR）。落位后本页
+        照常进轮询（target_page 回 cursor），上游恢复即自愈。"""
+        nonlocal cursor
+        if pending_page is not None and loaded and pages:
+            cursor = pending_page % len(pages)
+
     def _resize(total):
         """响应 total → pages 定长列表（新增 None 占位、超出回收）。
         页对象在 do_fetch 按响应 type 挂载——overview 单例/新建挂
@@ -647,6 +658,7 @@ def run(board, networks, cfg):
             # 执行，连按只是排队逐轮拉，无风暴。
         except client.FetchError as exc:
             timeline.mark_fetch_done(error=True)
+            _fail_switch()   # 换页失败也落位（跳过持续 err 的页）
             pending_page = None
             if restoring:
                 restoring = False
@@ -654,6 +666,7 @@ def run(board, networks, cfg):
             _note_fail(str(exc))
         except Exception as exc:        # 意外异常兑底：不穿透杀死主循环
             timeline.mark_fetch_done(error=True)
+            _fail_switch()   # 换页失败也落位（跳过持续 err 的页）
             pending_page = None
             if restoring:
                 restoring = False
