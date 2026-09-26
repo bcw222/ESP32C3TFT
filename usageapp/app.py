@@ -411,13 +411,21 @@ def run(board, networks, cfg):
 
     def _note_fail(message):
         """统一失败入口：连续失败计数 +1（错误页 fail #N 屏显，成功
-        归零）、串口详情打印、按 loaded 分流——从未成功→错误页；
-        已成功→全页 stale。"""
+        归零）、串口详情打印、按「本次失败页是否已有数据」分流——
+        该页从未拉到过数据（首次拉取失败，含换页目标页）→独立错误页；
+        该页已有数据（轮询失败 / 上游 503）→全页 stale 保留旧数据。
+
+        （2026-09-26 owner 定 B：此前只看全局 loaded，只要成功加载
+        过任一页，之后单页首拉失败也走 degrade_stale，屏上只剩叠加的
+        单行 ASCII，没有整页错误页——与「首次错误有整页」的预期不符。）
+
+        判据用 cursor 所在页对象：换页失败已由 _fail_switch 把 cursor
+        落到目标页，故 page_at(cursor) is None 即「目标页无数据」。"""
         nonlocal fails
         fails += 1
         print('[usage] fetch fail #{}: {}'.format(fails, message))
         error_page.set_fails(fails)
-        if loaded:
+        if loaded and page_at(cursor) is not None:
             degrade_stale(message)
         else:
             enter_error_page(message)
@@ -479,7 +487,8 @@ def run(board, networks, cfg):
         否则目标被丢弃、cursor 不动，下一记上键 (cursor+1)%total 又
         指回同一页——该页持续 erroring 时永远翻不过去（2026-09-26
         owner 报「一页卡住没法翻页」）。仅 loaded（成功加载过）生效：
-        首拉失败走独立错误页兜底（cursor 归 ERR_CURSOR）。落位后本页
+        未加载过时 cursor 不动，失败由 _note_fail 按「目标页无数据」
+        判据进独立错误页（cursor 归 ERR_CURSOR）。落位后本页
         照常进轮询（target_page 回 cursor），上游恢复即自愈。"""
         nonlocal cursor
         if pending_page is not None and loaded and pages:
