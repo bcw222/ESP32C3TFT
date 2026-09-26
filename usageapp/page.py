@@ -471,8 +471,9 @@ class ProviderPage:
 
     def set_error_keep(self, message=''):
         """失败统一入口（2026-09-05）：标 stale 保留旧数据 + 页头下
-        ASCII 单行错误（app 按 loaded 分流——未加载过直接错误页，
-        清空式 set_error 已删除）。文本 ASCII 防护：非 ASCII 不留字；
+        ASCII 单行错误（app 按「本次失败页是否已有数据」分流——该页
+        从未拉到过数据直接错误页（2026-09-26 owner 定 B，此前只看
+        全局 loaded），清空式 set_error 已删除）。文本 ASCII 防护：非 ASCII 不留字；
         限宽 ERR_MAX_CHARS（止步 RSSI 角标左缘，不叠字）。"""
         self.status = 'stale'
         self.error_text = _ascii((message or '')[:ERR_MAX_CHARS]) or ''
