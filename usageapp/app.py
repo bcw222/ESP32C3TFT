@@ -5,10 +5,12 @@
 - 调度 fetch：恒定周期（亮屏 poll_interval / 调暗 dim_poll_interval），
   下键/唤醒/换页立即发起（服务器无抓取缓存，每个请求都是实时抓取）
 - 页面序列完全由响应驱动（无占位）：overview（若有）+ providers[]；
-  按 id 复用页对象保留增量渲染状态；失败按 loaded（首次成功加载
-  标志）分流：从未成功 → 独立错误页（retry Ns + 连续失败计数
-  fail #N，证明循环活着在重试）；成功过 → 全部页标 stale 保留旧
-  数据 + 页头下 ASCII 单行错误（当前页保持显示，不跳页）。
+  按 id 复用页对象保留增量渲染状态；失败按「本次失败页是否已有
+  数据」分流：该页无数据（首次拉取失败，含换页目标页）→ 独立
+  错误页（retry Ns + 连续失败计数 fail #N，证明循环活着在重试）；
+  该页有旧数据 → 全部页标 stale 保留旧数据 + 页头下 ASCII 单行
+  错误（当前页保持显示，不跳页）。错误页也是完整页：有页表时
+  上键可翻页离开（以 err_from 为起点前移一页，跳过坏页）。
   服务端无状态化（2026-09-08）：provider 页失败一律 503 + error.code
   ——端侧非 200 走此分流，stale 徽标/ERR_Y/wait 红三件同步出现消失
 - 诊断：任何失败串口 [usage] 前缀打印（fail #N 计数、SSR 下载失败、
@@ -278,6 +280,7 @@ def run(board, networks, cfg):
     net_ok = True
     loaded = False     # 首次成功加载标志：False 期失败→错误页；True 后→stale
     fails = 0          # 连续失败计数（错误页 fail #N 屏显；成功归零）
+    err_from = None    # 错误页代表的页码（无数据页游标）；None=无页表可翻
 
     # y=222：标注行 y204，给 4 行紧凑档让位（旣往 y216 时与第三行打架）。
     # fetch 段三色分段（用户定稿）：响应到达后按服务端 timing 把暗段
@@ -390,12 +393,15 @@ def run(board, networks, cfg):
         return pages[idx % len(pages)]
 
     def enter_error_page(message):
-        """init 失败路径（loaded=False，从未拿到过数据）：独立错误页
+        """失败页无数据（含 loaded=True 时单页首拉失败）：独立错误页
         兑底（不进 pages），cursor 置 ERR_CURSOR；重试时 target_page
-        回 0 拉 total。"""
-        nonlocal net_ok, cursor
+        回 0 拉 total。进入前记下所在页码 err_from——错误页也是完整页
+        （2026-09-26 owner 定），上键翻页以它为起点前移一页，从而
+        跳过持续无数据的坏页（此前错误页吞掉上键，坏页永远拦住后续页）。"""
+        nonlocal net_ok, cursor, err_from
         net_ok = False
         error_page.set(message)
+        err_from = cursor if (pages and 0 <= cursor < len(pages)) else None
         cursor = ERR_CURSOR
 
     def degrade_stale(message):
@@ -700,11 +706,16 @@ def run(board, networks, cfg):
             refresh_count = 0        # 换页打断连续手动刷新计数
             if dim_key:
                 last_activity = now          # 暗屏中：仅唤醒
-            elif cursor != ERR_CURSOR and len(pages) > 1:
+            elif len(pages) > 1:
                 # 不立即切页：算目标页码（本地回卷 (n+1)%total），挂
                 # pending_page；fetch 完成后才真正切过去。错误页
-                # （ERR_CURSOR 兜底态）不作为翻页目的地。
-                pending_page = (cursor + 1) % len(pages)
+                # （ERR_CURSOR 兜底态）不作为翻页目的地，但自身可作
+                # 起点离开：以 err_from（错误页代表的页码，缺省首页）
+                # 为基准前移一页，跳过持续无数据的坏页（2026-09-26
+                # owner 定「错误页也是一个完整的页」）。
+                base = cursor if cursor != ERR_CURSOR else (
+                    err_from if err_from is not None else -1)
+                pending_page = (base + 1) % len(pages)
                 force_refresh = True    # 立即发起换页 fetch
                 # 注意：换页只清零连续计数（见本段开头），不清除已记住
                 # 页——记忆是长期书签，仅开机加载失败才清除。
