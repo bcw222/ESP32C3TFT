@@ -21,8 +21,9 @@ stale 年龄：status=stale 时页头状态走字 "stale Nm"（用 updated_at）
 错误模型（2026-09-05 定稿）：状态徽标两态 ok/stale——error 徽标删除，
 错误详情一律页头下 ERR_Y ASCII 单行（status≠ok 时）或独立 ErrorPage
 （带连续失败计数 fail #N，证明主循环活着在重试）。总览行级
-items[].status=error：屏蔽服务端 percent=0.0 兜底——该行不画条/"0%"/
-倒计时，percent 槽画红 'err'；status=stale 行是真实旧值照常渲染。
+items[].status=error：行级 stale（2026-09-17 定稿）——同 id 有上一轮
+数据就复用旧值，条/百分比/金额照常渲染，行末槽画红 'err' 顶掉时间显示；
+无历史（首拉即失败）才屏蔽为无数据；status=stale 行是真实旧值照常渲染。
 
 页头固定槽位：名字 x4 宽 13 字符 | RSSI 角标 x160 宽 8 字符（app 画，
 page 不碰）| 状态文字右对齐 x226 最多 9 字符 | 状态点 x226。
@@ -97,9 +98,9 @@ ERR_SLOT_W = 232          # 错误行槽
 LABEL_SLOT_W = 160        # 行标签槽：x8..x168（百分比文本 x176 起）
 OV_ITEM_SLOT_W = 80       # 总览行名槽：x8..x88（迷你条 x96 起）
 
-# 总览行右侧数值区（bundle 剩余 / balance 余额）：金额大字（端侧位图
-# 字体 lib/digits 现场画，含 ¥/$ 符号——字符集已并入字体子集），
-# 右对齐 x232。金额每轮变化 → 端侧现场（不贴图，内容寻址下贴图会
+# 总览行右端时间槽：距重置倒计时 / 行级 error 红 'err'，右对齐 x232。
+# 余额金额 ASCII 左对齐条起点 BAR_X（2026-09-18 定稿，与 err 各占一端
+# 互不冲突）。金额每轮变化 → 端侧现场（不贴图，内容寻址下贴图会
 # 每次变化都触发新 hash 下载）。
 AMT_RIGHT = 232
 _AMT_CHAR_N = 11                          # 数字最多 11 字符
@@ -1080,9 +1081,9 @@ class OverviewPage:
     每 provider 一行，行内自左向右：行名贴图 → 进度条 → 百分比
     （紧贴条尾）→ 距重置倒计时（行末，极短格式 Xh/Xm/Xd）。
     - plan/bundle ：迷你条 + 百分比 + 倒计时
-    - balance     ：金额大数字（lib/digits 位图字体，含 ¥/$ 符号，
-                    峰谷语义色：state peak 红 / offpeak 绿 / 无峰谷灰）；
-                    无条无百分比
+    - balance     ：金额 ASCII 直画（币种码+金额，vga 左对齐条起点
+                    BAR_X；峰谷语义色：state peak 红 / offpeak 绿 /
+                    无峰谷灰）；无条无百分比
     贴图缺失一律留空不占位（不画 '--'/id）；数字/百分比/倒计时端侧现场。
     最多 6 行。
     """
@@ -1124,6 +1125,9 @@ class OverviewPage:
         self.status = st if st in ('ok', 'stale') else 'stale'
         rows = []
         items_alt = []
+        # 行级 stale 复用源：id → 上一轮完整行（服务端无状态化不存
+        # last-known-good，旧值只在端侧页对象）
+        old_rows = {r[0]: r for r in self.rows}
         for item in (ov.get('items') or [])[:self.MAX_ROWS]:
             try:
                 percent = float(item['percent'])
@@ -1135,22 +1139,33 @@ class OverviewPage:
             # 级（degrade_stale 传播，走下方 stat or self.status 回退）
             # ——服务端无状态化后行级不产 stale，收到也归一 ok 不屏蔽
             # 数据（纯防御）
+            ident = str(item.get('id') or '?')
             stat = ('error'
                     if str(item.get('status') or '') == 'error' else '')
-            if stat == 'error':
-                # 行级上游失败且无历史（服务端对无数据 plan/bundle 下发
-                # percent=0.0 兜底靠 status 显异常）：端侧屏蔽为无数据，
-                # 该行画红 'err'，绝不渲染虚假 0%（2026-09-05）
-                percent = None
-                amt = ''
             rst = item.get('reset_at')
             state = str(item.get('state') or '')
-            rows.append((str(item.get('id') or '?'),
+            currency = str(item.get('currency') or '')
+            if stat == 'error':
+                # 行级上游失败 = 行级 stale（2026-09-17 定稿）：服务端
+                # 对无数据 plan/bundle 下发 percent=0.0 兜底靠 status 显
+                # 异常——端侧屏蔽兜底值，同 id 有上一轮数据就复用旧值
+                # （条/百分比/金额照常渲染，绝不显示虚假 0%）；无历史
+                # （首拉即失败）才归无数据。红 'err' 画在行末槽（只顶
+                # 掉时间显示），故 reset_at 不复用。
+                rst = None
+                old = old_rows.get(ident)
+                if old is not None:
+                    percent, amt, currency, state = (old[1], old[3],
+                                                     old[4], old[8])
+                else:
+                    percent = None
+                    amt = ''
+            rows.append((ident,
                          percent,
                          str(item.get('kind') or ('plan' if percent is not None
                                                   else 'balance')),
                          amt,
-                         str(item.get('currency') or ''),
+                         currency,
                          item.get('render'),
                          rst if isinstance(rst, (int, float)) else None,
                          stat or self.status,
@@ -1287,43 +1302,39 @@ class OverviewPage:
             color = self._row_rgb(percent, state)
             fill = 0
             big = None
+            # 行级 error = 行级 stale（2026-09-17 定稿）：update 已复用
+            # 同 id 上一轮 percent/amount，条/百分比照常渲染；无历史的
+            # 行 percent=None（update 屏蔽）自然不画——绝不渲染虚假 0%
+            pct = self._pct_str(percent, now_epoch)
+            if percent is not None:
+                display.fill_rect(self.BAR_X, y + 3, self.BAR_W,
+                                  self.BAR_H, _col(TRACK_RGB))
+                fill = _fill_w(percent, self.BAR_W)
+                if fill:
+                    display.fill_rect(self.BAR_X, y + 3, fill,
+                                      self.BAR_H, color)
+                if pct:
+                    display.text(font, pct, OV_PCT_X, y, color, BG())
+            elif amount:
+                # 余额行：**ASCII 直画**（用户定稿，不用大字也不用
+                # 贴图）：币种码 + 空格 + 金额，vga 左对齐条起点
+                # （BAR_X，2026-09-18 定稿）——右端行末槽留给倒计时/
+                # 红 'err'（error 行金额照画，各占一端不冲突）
+                txt = (_currency_code(currency) + ' ' + amount) \
+                    if _currency_code(currency) else amount
+                display.text(font, txt, self.BAR_X, y, color, BG())
+                big = txt
+            # 行末槽：error 行红 'err' 顶掉时间显示（rst 在 update 已
+            # 置 None），其余画距重置倒计时（余额行无倒计时）
             if stat == 'error':
-                # 行级失败（update 已屏蔽 percent/amount）：不画条/
-                # 倒计时，percent 槽画红 'err'——绝不渲染虚假 0%
-                pct = 'err'
-                display.text(font, pct, OV_PCT_X, y, _col(_ERR_RGB), BG())
+                cd = 'err'
             else:
-                pct = self._pct_str(percent, now_epoch)
-                if percent is not None:
-                    display.fill_rect(self.BAR_X, y + 3, self.BAR_W,
-                                      self.BAR_H, _col(TRACK_RGB))
-                    fill = _fill_w(percent, self.BAR_W)
-                    if fill:
-                        display.fill_rect(self.BAR_X, y + 3, fill,
-                                          self.BAR_H, color)
-                    if pct:
-                        display.text(font, pct, OV_PCT_X, y, color, BG())
-                elif amount:
-                    # 余额行：**ASCII 直画**（用户定稿，不用大字也不用
-                    # 贴图）：币种码 + 空格 + 金额，vga 右对齐（CNY 110.5）
-                    txt = (_currency_code(currency) + ' ' + amount) \
-                        if _currency_code(currency) else amount
-                    self._erase_row_right(display, font, y)
-                    display.text(font, txt,
-                                 AMT_RIGHT - len(txt) * _CHAR_W, y,
-                                 color, BG())
-                    big = txt
-            cd = None if stat == 'error' else self._cd_str(reset_at,
-                                                           now_epoch)
+                cd = self._cd_str(reset_at, now_epoch)
             if cd:
                 display.text(font, cd, AMT_RIGHT - len(cd) * _CHAR_W, y,
-                             _col(_CAPTION_RGB), BG())
+                             _col(_ERR_RGB if stat == 'error'
+                                  else _CAPTION_RGB), BG())
             self._last.append([fill, color, pct, img, cd, big])
-
-    def _erase_row_right(self, display, font, y):
-        """擦总览行右端数值区（币种码+空格+金额最多 ~17 字符）。"""
-        display.fill_rect(AMT_RIGHT - 17 * _CHAR_W, y, 17 * _CHAR_W,
-                          font.HEIGHT, BG())
 
     def _render_diff(self, display, font, now_epoch, store=None):
         # 标题贴图补贴
@@ -1381,30 +1392,32 @@ class OverviewPage:
                 display.fill_rect(self.BAR_X, y + 3, fill, self.BAR_H, color)
             # 余额行 ASCII：仅内容变化才重画（amount/state 均在 sig
             # 内，正常不会走到；防御后补画）。不变则零 SPI 写。
+            # 左对齐条起点；擦旧按新旧较长者（不碰右端倒计时/'err'）。
             if percent is None and amount:
                 txt = (_currency_code(currency) + ' ' + amount) \
                     if _currency_code(currency) else amount
                 if txt != big_old:
-                    self._erase_row_right(display, font, y)
-                    display.text(font, txt,
-                                 AMT_RIGHT - len(txt) * _CHAR_W, y,
-                                 color, BG())
+                    n = max(len(big_old or ''), len(txt))
+                    _erase_text(display, self.BAR_X, y, n, font.HEIGHT)
+                    display.text(font, txt, self.BAR_X, y, color, BG())
                     big_old = txt
             else:
                 big_old = None
-            # 百分比：紧贴条尾固定槽；行级 error 恒红 'err'（不闪不重算）
-            pct = 'err' if stat == 'error' \
-                else self._pct_str(percent, now_epoch)
+            # 百分比：紧贴条尾固定槽（行级 error 也是复用的真实旧值，
+            # 走同一路径——err 已挪到行末槽，2026-09-17 定稿）
+            pct = self._pct_str(percent, now_epoch)
             if pct != pct_old_val:
                 n = max(len(pct_old_val or ''), len(pct or ''))
                 _erase_text(display, OV_PCT_X, y, n, font.HEIGHT)
                 if pct:
-                    display.text(font, pct, OV_PCT_X, y,
-                                 _col(_ERR_RGB) if stat == 'error'
-                                 else color, BG())
-            # 距重置倒计时：行末右对齐（走字；error 行不画）
-            cd = None if stat == 'error' else self._cd_str(reset_at,
-                                                           now_epoch)
+                    display.text(font, pct, OV_PCT_X, y, color, BG())
+            # 行末槽：error 行红 'err'（恒定不闪），否则距重置倒计时
+            # （走字）；两者同槽互斥，值变即擦写（正常 error 态进出由
+            # sig 变化触发全量重画，这里纯防御）
+            if stat == 'error':
+                cd = 'err'
+            else:
+                cd = self._cd_str(reset_at, now_epoch)
             if cd != cd_old:
                 n = max(len(cd_old), len(cd or ''))
                 if cd_old:
@@ -1412,7 +1425,8 @@ class OverviewPage:
                                 font.HEIGHT)
                 if cd:
                     display.text(font, cd, AMT_RIGHT - len(cd) * _CHAR_W, y,
-                                 _col(_CAPTION_RGB), BG())
+                                 _col(_ERR_RGB if stat == 'error'
+                                      else _CAPTION_RGB), BG())
             self._last[i] = [fill, color, pct, img, cd, big_old]
 
 
