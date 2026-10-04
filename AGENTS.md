@@ -63,7 +63,9 @@ mpy-cross -o dst.mpy src.py       # 单文件交叉编译
   服务端不回传该值），用于本地/无凭据调端侧界面；端侧无假数据开关。
   `demo.fail_after_first: true` = 每个 provider 首次抓取必然成功、
   之后必然失败（2026-09-18 加）——真机调试总览行级 stale（行末红
-  err + 旧值复用）与 provider 页 503 失败路径；热重载/重启即重置。
+  err + 旧值复用）与 provider 页失败路径；热重载/重启即重置。
+  **服务端按 v 分流**：v3 = 部分 err（200，标题照常 + 红 err）、
+  v2 = 503（整页失败路径）。
 
 ### 服务端日志（2026-09-10 统一 logging）
 
@@ -124,11 +126,15 @@ llm-usage-server 全项目日志改标准库 `logging`（此前裸 print 混流�
 - **新鲜度归客户端 + 服务端无状态（2026-09-08 定稿）**：服务器无抓取
   缓存、**无 last-known-good**，每个数据请求实时打上游；轮询周期/换页/
   强刷节奏全由端侧定，协议无 refresh 参数。**历史快照在端侧**——服务端
-  随时可重启，端侧数据不丢。上游失败：provider 页返回 **503** +
+  随时可重启，端侧数据不丢。上游失败（**按 v 分流**）：provider 页
+  **v3 = 部分 err** → **200** + config 派生内容照常（`title_render`/
+  `id`/`kind`）+ `status="error"` + `error.code`（端侧 `partial_err`
+  渲染路径：复用上轮数据 + stale 灰徽标带年龄 + ERR_Y 机器码 + 红
+  ASCII `err`，**不是整页失败单位**）；**v2 及更早 = 503** +
   `{"error": {"code": ...}}`（端侧按非 200 走统一失败路径）；overview
   聚合页行级 `items[].status=error`（红 `err`）、页面级恒 ok + 下发
   `updated_at`（聚合时刻，端侧 degrade_stale 时 stale 徽标带年龄）。
-- **契约版本协商 v2**（2026-10-04 owner 定）：数据端点请求必带 `v=2`
+- **契约版本协商 v3**（2026-10-04 owner 定）：数据端点请求必带 `v=3`
   （`client=1` 已废）；响应回显 `v`，端侧校验不符即
   `FetchError('incompatible payload')` 走统一失败路径——防服务端
   降级应答这类静默不兼容（19 字符恰等于 `ERR_MAX_CHARS`，ERR_Y
@@ -156,13 +162,22 @@ llm-usage-server 全项目日志改标准库 `logging`（此前裸 print 混流�
   `fail #N`**，单调递增证明循环活着在重试——同内容重试屏显无变化
   看不出；成功归零）；**该页已有数据** → `degrade_stale`：全部页（含总览）
   标 stale 保留旧数据 + 页头下 ERR_Y ASCII 单行错误，当前页保持显示
-  不跳页。**服务端无状态化后 provider 页失败一律 503**（不再 200 +
-  status=error）：端侧非 200 → 解析 `error.code` 机器码作 FetchError
-  文本（client.py）→ 走上述统一失败路径——stale 徽标（用端侧上次
-  成功响应存的 `updated_at` 带年龄）+ ERR_Y 单行 + 时间条 wait 段
-  错误红**同步出现、同步消失**（恢复 200 → update 换 ok → sig 变 →
-  全量重画涂掉全部错误痕迹）。200 + `status=error` 仅剩 total=0 空
-  overview 防御（串口 `[usage] page status=error: <code>` 留痕）。
+  不跳页。**provider 页失败按契约版本分流（2026-10-04 owner 定 v3）**：
+  - **v3（现行）= 部分 err**：200 + `status=error` + `error.code` →
+    `ProviderPage.partial_err` 路径——**不进失败分流**：config 派生内容
+    （标题等）照常显示，数据区复用上轮数据（沿用总览行级 error 定稿
+    2026-09-17，**绝不显示服务端兜底的虚假 0%**）+ stale 灰徽标（沿用
+    上轮 `updated_at` 带年龄）+ ERR_Y 单行机器码；**首拉即失败无历史**
+    → 只留标题 + ERR_Y + 数据区红 ASCII `err`。
+  - **v2 及更早 = 整页 503**：端侧非 200 → 解析 `error.code` 机器码作
+    FetchError 文本（client.py）→ 走上述统一失败路径——stale 徽标（用
+    端侧上次成功响应存的 `updated_at` 带年龄）+ ERR_Y 单行 + 时间条
+    wait 段错误红**同步出现、同步消失**（恢复 200 → update 换 ok →
+    sig 变 → 全量重画涂掉全部错误痕迹）。
+  - 错误呈现**全部纯 ASCII、不入 SSR**（沿用 2026-09-02 定稿）：ERR_Y
+    机器码行 + 红 `err` 元素，均端侧 vga 直画。
+  - total=0 空 overview 仍为 200 + `status=error` 防御（串口
+    `[usage] page partial err: <code>` 留痕）。
   `do_fetch` 有 `except Exception` 兑底（`sys.print_exception` 串口
   traceback）——意外异常不再穿透杀死主循环。任何失败串口 `[usage]`
   前缀打印详情（fetch fail #N / ssr 下载失败 / ssr miss / png oom /
@@ -356,6 +371,7 @@ inactivity 并清锁存）。锁存滞留由**引脚电平哨兵**兑底：每 t
 （`set_net_error` 路径），换页不标 stale。
 **换页 fetch 失败目标页也照常落位**（`_fail_switch`，2026-09-26）：否则 cursor 不动、下一记上键又指回同一页，该页持续 erroring 时永远翻不过去——落位后翻页可跳过 err 的页，本页照常进轮询、上游恢复自愈（仅 loaded 后生效）。
 **单页首拉失败 = 整页错误页**（2026-09-26 owner 定 B）：分流判据是「失败页是否已有数据」而非全局 `loaded`——某页从未拉到过数据（含换页目标页）时 fetch 失败 → `cursor=ERR_CURSOR` 独立错误页，即使其它页已加载成功；该页有旧数据（轮询失败/上游 503）→ `degrade_stale` 全页 stale 照旧。
+**注（v3 起）**：该分流只管**非 200**（v2 整页 503 / 网络失败 / 版本不兼容）。v3 的 provider 页部分 err 是 **200**，走 `partial_err` 渲染路径，**不产生错误页也不标 degrade_stale**——已配置内容照常显示。
 **错误页也可翻页跳过**（2026-09-26 owner 定，接上条）：错误页也是一个完整的页——只是没有 stale 数据、不知内容布局才整页错误，故上键在错误页上同样生效。`enter_error_page` 进入前把所在页码记入 `err_from`（无有效页时 None），上键以 `err_from`（缺省 -1=首页）为基准 `(base+1)%len(pages)` 挂 `pending_page` 并立即 fetch；错误页本身仍不作为翻页目的地（只会由失败进入）。⇒ 某页长期无数据且持续失败时可连续上键跳过，不再被坏页拦住；`len(pages)<=1` 无可翻时上键仍是空操作。
 
 **页面序列由响应 page/total/type 驱动（2026-09-02）**：端侧只维护页码

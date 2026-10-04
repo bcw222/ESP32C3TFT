@@ -587,10 +587,14 @@ def run(board, networks, cfg):
             # provider 页失败已是 503 走 FetchError 失败路径（degrade_stale
             # 三件同步）。此处仅串口留痕作防御。
             if str(data.get('status') or '') == 'error':
+                # v3 单页部分 err：服务端回 200 + config 派生内容 + 数据区
+                # 元素级 err（ProviderPage.partial_err 渲染路径）。此处仅串口
+                # 留痕——**不进失败路径**：标题等已配置内容照常显示，错误以
+                # 纯 ASCII 行/红 err 呈现，不是整页失败单位。
                 err = data.get('error')
                 code = (err.get('code') if isinstance(err, dict)
                         else None) or 'no code'
-                print('[usage] page status=error: {}'.format(code))
+                print('[usage] page partial err: {}'.format(code))
             typ = data.get('type')
             total = data.get('total')
             try:
