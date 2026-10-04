@@ -97,7 +97,7 @@ def main():
     d, f = FakeDisplay(), FakeFont()
     now = 1_800_000_000
 
-    # client=1 schema 形态的样例数据（契约样例；服务端 demo 假数据
+    # v=2 schema 形态的样例数据（契约样例；服务端 demo 假数据
     # 由 llm-usage-server 自测覆盖，端侧只认结构）
     glm_data = {
         'server_time': now, 'id': 'glm', 'status': 'ok',
@@ -566,6 +566,70 @@ def main():
         d.png = orig_png
     rstore.missing([])                      # 新周期清退避
     assert rstore.usable(h_oom, 104) is not None
+
+    # ---- 契约版本协商 v2（SCHEMA「版本协商 v2」）----
+    # fetch_page/_endpoint_get 在此之前从未被冒烟覆盖（只测了 render
+    # 下载路径），而 v 必填 + 回显校验正是本轮契约改动的核心——
+    # 必须显式覆盖，否则冒烟全绿也证明不了协商路径正确。
+    seen = {'paths': []}
+
+    def make_fake_page(code, body_obj):
+        def fake_page(host, port, path, on_wait=None, sink=None,
+                      timeout_ms=0, auth_key=''):
+            assert sink is None
+            seen['paths'].append(path)
+            return code, json.dumps(body_obj).encode('utf-8')
+        return fake_page
+
+    ver_cfg = {'url': 'http://example.invalid:8765', 'key': 'testkey'}
+    ok_page = {'v': 2, 'type': 'provider', 'total': 1, 'page': 0,
+               'id': 'p', 'status': 'ok', 'server_time': 0, 'quotas': []}
+
+    orig_get = client.http_get
+    try:
+        # 1) 正常：请求必带 v=2，响应回显 v=2 → 通过
+        client.http_get = make_fake_page(200, ok_page)
+        got = client.fetch_page(ver_cfg, 0)
+        assert got['v'] == 2
+        assert 'v=2' in seen['paths'][-1], '请求必须带 v=2'
+        assert 'client=1' not in seen['paths'][-1], '旧 client 参数须消失'
+
+        # 2) 回显缺失 → incompatible payload（不静默按 v1 语义解析）
+        client.http_get = make_fake_page(200, dict(ok_page, v=None))
+        try:
+            client.fetch_page(ver_cfg, 0)
+            raise AssertionError('缺 v 回显应抛 FetchError')
+        except client.FetchError as exc:
+            assert 'incompatible payload' in str(exc)
+
+        # 3) 回显版本不符（服务端降级应答）→ incompatible payload
+        client.http_get = make_fake_page(200, dict(ok_page, v=1))
+        try:
+            client.fetch_page(ver_cfg, 0)
+            raise AssertionError('v 回显不符应抛 FetchError')
+        except client.FetchError as exc:
+            assert 'incompatible payload' in str(exc)
+
+        # 4) 400 + 字符串 error → 整串作错误文本，不退化成脏 JSON 片段
+        client.http_get = make_fake_page(
+            400, {'error': 'incompatible payload'})
+        try:
+            client.fetch_page(ver_cfg, 0)
+            raise AssertionError('400 应抛 FetchError')
+        except client.FetchError as exc:
+            assert str(exc) == 'incompatible payload', \
+                '字符串 error 应整串直出，实际: %r' % str(exc)
+
+        # 5) 503 + 结构化 error.code 仍走机器码路径（未回归）
+        client.http_get = make_fake_page(
+            503, {'error': {'code': 'upstream_timeout'}})
+        try:
+            client.fetch_page(ver_cfg, 0)
+            raise AssertionError('503 应抛 FetchError')
+        except client.FetchError as exc:
+            assert str(exc) == 'upstream_timeout'
+    finally:
+        client.http_get = orig_get
 
     print('smoke OK: {} 次绘制调用, {} 张贴图'
           .format(d.calls, len(d.pngs)))

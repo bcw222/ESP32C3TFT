@@ -128,7 +128,12 @@ llm-usage-server 全项目日志改标准库 `logging`（此前裸 print 混流�
   `{"error": {"code": ...}}`（端侧按非 200 走统一失败路径）；overview
   聚合页行级 `items[].status=error`（红 `err`）、页面级恒 ok + 下发
   `updated_at`（聚合时刻，端侧 degrade_stale 时 stale 徽标带年龄）。
-- `client=1` 声明端侧能力；**响应无 version 字段**（端侧声明啥收啥）。
+- **契约版本协商 v2**（2026-10-04 owner 定）：数据端点请求必带 `v=2`
+  （`client=1` 已废）；响应回显 `v`，端侧校验不符即
+  `FetchError('incompatible payload')` 走统一失败路径——防服务端
+  降级应答这类静默不兼容（19 字符恰等于 `ERR_MAX_CHARS`，ERR_Y
+  单行完整显示不截断）。服务端须永久兼容已登记版本；老端侧不发
+  `v`，升级服务端后失效是既定代价。
 - 认证走 `Authorization: Bearer <key>` 头，**key 不落 URL/日志**。
 - `server_time` 是 unix **秒**，数据端点都回，任一端点都能校准时钟。
 - `timing`={wait,upstream,serve}ms 搭车字段，数据端点都回；端侧据此
