@@ -719,6 +719,12 @@ def run(board, networks, cfg):
                 force_refresh = True    # 立即发起换页 fetch
                 # 注意：换页只清零连续计数（见本段开头），不清除已记住
                 # 页——记忆是长期书签，仅开机加载失败才清除。
+                # 换页同时重置连续失败计数（2026-10-04 owner 定）：翻页
+                # 是新的诊断起点——上一张页的失败次数对当前页无意义，且
+                # 错误页屏显 fail #N 会被旧页的连败数污染。error_page
+                # 一并归零，保证屏显与计数同源（否则屏显留旧值）。
+                fails = 0
+                error_page.set_fails(0)
                 last_activity = now
 
         # ---- 手动刷新键：读到 flags 再落到局部状态（否则失联） ----
