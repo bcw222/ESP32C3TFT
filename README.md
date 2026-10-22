@@ -45,6 +45,16 @@ cp wlan_cfg.py usage_cfg.py dist/   # 可选：本地真实配置覆盖后再烧
 mpremote cp -r dist/* :             # 全量烧录
 ```
 
+## 契约与版本
+
+契约以 `llm-usage-server/SCHEMA.md` 为唯一事实源（现行版本）；已发布版本
+全文冻结在 `schema/vN.md`，git tag `schema-vN` 为锚点（`schema-v1` = v1 定稿）。
+版本演进规则：**演进即 +1**、**只归档不删不改**、**服务端必须向后兼容所有
+已发布版本**（升级服务端不得使本端侧失效）。
+
+服务端仓库：`git.team.silveridge.cn:3443/groundsquare/llm-usage-server`，
+本仓库与它以 `schema-vN` tag 互为版本锚点。
+
 ## 运行形态
 
 开机即进用量应用——连 WiFi、轮询 usage-server、数据页 + 时间条
