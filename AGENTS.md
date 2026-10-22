@@ -18,6 +18,12 @@
 ../llm-usage-server/SCHEMA.md   ← 唯一事实源（双方都以它为准）
 ```
 
+**版本锚点**：`SCHEMA.md` = 现行版本；已发布版本全文冻结在
+`llm-usage-server/schema/vN.md`，git tag `schema-vN` 为锚点（`schema-v1` = v1 定稿）。
+版本演进规则（owner 2026-10-04 定）：**演进即 +1**、**只归档不删不改**、
+**服务端必须向后兼容所有已发布版本**——升级服务端不得使任何已发布版本的
+本端侧失效。端侧本仓库与 llm-usage-server 以 `schema-vN` tag 互为版本锚点。
+
 端侧不持有任何 provider 凭据、不做 schema 校验、不做 provider 特判。
 加 provider / 换 provider 只改服务端配置，端侧零改动。
 
@@ -133,7 +139,9 @@ llm-usage-server 全项目日志改标准库 `logging`（此前裸 print 混流�
 - `server_time` 是 unix **秒**，数据端点都回，任一端点都能校准时钟。
 - `timing`={wait,upstream,serve}ms 搭车字段，数据端点都回；端侧据此
   把时间条 fetch 段重涂三色（upstream 直接用；wait 退居遥测）；必须容忍缺失（旧版可无）。
-  详见 llm-usage-server/specs/003（demo）与 ESP32C3TFT/specs/002（时间条三态）spec。
+  三态分段与标注行为见本文件 §6 `timeline.py` 与下方「时间条」定稿条目；
+  demo 延迟注入见 llm-usage-server README「demo 模式」与 config.example.yaml。
+  （历史说明，非活引用：原 003/002 号 spec 随旧 spec 流程全库删除，2026-10-04 清理。）
 - `?w=<px>`：贴图请求槽宽只读校验——超宽服务端照发 200 仅控制台警告；
   不参与 hash、不参与响应。
 - **字段语义**：`percent` 必有；其余数值可选；消费端**必须忽略未知字段**。
