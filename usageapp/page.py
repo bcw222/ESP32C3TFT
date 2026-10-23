@@ -433,6 +433,10 @@ class ProviderPage:
         self.error_text = ''
         self.updated_at = None
         self.title_hash = None      # SSR 贴图 hash（未下载/非法→ASCII）
+        self.partial_err = False    # 单页部分 err（v3，2026-10-04 owner 定）：
+                                    # 本轮上游失败但 config 派生内容（标题等）
+                                    # 照常显示，数据区元素级标 err——不是整页
+                                    # 失败单位
         self.rows = []              # [(label, pct, reset_at, amount, rhash)]
         self.balance = None         # {'currency','render','caption_render'}
         self.peak = None            # {'state','badge_render','caption_render',
@@ -484,70 +488,93 @@ class ProviderPage:
         累计进挂起 Δ 显示，不推进基准；亮屏轮一次性结算累计。
         night：本次响应的渲染套（hash 含 theme）——顺路登记进 _alt
         记忆库，昼夜切换 swap_renders 回填另一套时用。"""
-        # 徽标两态：status 只收 ok/stale（服务器 status=error 由 app
-        # 拦截转 FetchError，这里归一 stale 纯防御）
+        # 徽标两态：status 只收 ok/stale。
+        # status=error = **单页部分 err**（SCHEMA v3，2026-10-04 owner 定）：
+        # provider 页上游失败时服务端不再整页 503，而是回 200 + config
+        # 派生内容（title_render 等）+ error.code。此处照常解析全页数据，
+        # 徽标归 stale（灰）+ ERR_Y 纯 ASCII 机器码行 + 数据区元素级 err
+        # ——标题等已配置内容该显示就显示，不被整页错误页吞掉。
+        # v2 及更早的服务端整页失败走 503 → app 的 FetchError 路径，
+        # 根本到不了这里（app 仅串口留痕）。
         st = str(pdata.get('status') or 'ok')
+        self.partial_err = (st == 'error')
         self.status = st if st in ('ok', 'stale') else 'stale'
-        self.updated_at = pdata.get('updated_at')
+        # 部分 err：本轮无成功数据 → 沿用上一轮 updated_at，徽标才能显示
+        # 「数据来自 N 分钟前」（服务端 error 响应不带 updated_at）。
+        if not self.partial_err:
+            self.updated_at = pdata.get('updated_at')
         self.title_hash = pdata.get('title_render')
         err = pdata.get('error')
         if isinstance(err, dict):    # 结构化 error：只取 machine code
             # 2026-09-02：error.render 停发——错误统一端侧 ASCII 单行
             err = err.get('code') or 'error'
         self.error_text = _ascii(str(err or '')[:ERR_MAX_CHARS]) or ''
-
-        # balance 块（余额大字插图 + 灰标签 + 金额纯文本降级）
-        bal = pdata.get('balance')
-        if isinstance(bal, dict):
-            self.balance = {'currency': str(bal.get('currency', '')),
-                            'render': bal.get('render'),
-                            'caption_render': bal.get('caption_render'),
-                            'amount_text': (str(bal.get('amount_text') or '')
-                                            [:14])}
-        else:
-            self.balance = None
-
-        # peak 块（state + caption_render + ends_at；badge_render 仅稀疏余额
-        # 型下发；badge_small_render 已停发——2026-09-04/06）
-        pk = pdata.get('peak')
-        if isinstance(pk, dict):
-            self.peak = {'state': str(pk.get('state', '') or ''),
-                         'badge_render': pk.get('badge_render'),
-                         'caption_render': pk.get('caption_render'),
-                         'ends_at': pk.get('ends_at')}
-        else:
-            self.peak = None
-
+        # 部分 err（v3，2026-10-04 owner 定）：本轮上游失败 → 服务端仍回
+        # 200 + config 派生内容（title_render 等）+ error.code，数据区无
+        # 新数据。沿用总览行级 error 定稿（2026-09-17）：复用同页上一轮
+        # 的 quotas/balance/peak 照常渲染，绝不显示服务端兜底的虚假 0%；
+        # 首拉即失败则无历史 → 无数据，只留标题 + ERR_Y 纯 ASCII 行。
+        # 徽标 stale + ERR_Y 机器码由下方渲染路径统一处理。
         rows = []
         rows_alt = []
-        for quota in pdata.get('quotas') or []:
-            window = str(quota.get('id', '?')).split(':')[-1]
-            unit = UNIT_SHORT.get(quota.get('unit'), '')
-            label = '{} {}'.format(window, unit).rstrip()
-            try:
-                percent = float(quota.get('percent', 0.0))
-            except (TypeError, ValueError):
-                percent = 0.0
-            # 已用/总量小字：优先服务端格式化文本（SCHEMA amount_text，
-            # 2026-08-31 起 k/m 缩写归服务端）；缺失（旧服务器）回退
-            # 端侧 fmt_amount 自算——回退式样与服务端缺省逐字相同
-            amount = str(quota.get('amount_text') or '')
-            if not amount:
-                amount = '{} / {}'.format(
-                    fmt_amount(quota.get('used')),
-                    fmt_amount(quota.get('limit')))
-            reset_at = quota.get('reset_at')
-            rows.append((label, percent, reset_at, amount,
-                         quota.get('label_render')))
-            rows_alt.append(quota.get('label_render_alt'))
-        self._apply_deltas(rows, now_epoch, dark)
-        self.rows = rows
+        # bal/pk 在 guard 外预置：下方双套 hash 登记无条件引用二者，
+        # partial_err 时不经赋值 → 必须是 None 而非未定义。
+        bal = pdata.get('balance')
+        pk = pdata.get('peak')
+        if not self.partial_err:
 
-        # 稀疏型判定：quota 为空（纯余额型）且（有余额或有峰谷）→ 大字插图竖排；
-        # pack（1 quota，无峰谷大字的度量型）走既有普通布局——与 plan 单条一致。
-        # 有 quota 且有峰谷 → 密集型：峰谷退化为 title 下两小行。
-        self._sparse = (len(rows) == 0 and (self.balance is not None
-                                           or self.peak is not None))
+            # balance 块（余额大字插图 + 灰标签 + 金额纯文本降级）
+            bal = pdata.get('balance')
+            if isinstance(bal, dict):
+                self.balance = {'currency': str(bal.get('currency', '')),
+                                'render': bal.get('render'),
+                                'caption_render': bal.get('caption_render'),
+                                'amount_text': (str(bal.get('amount_text') or '')
+                                                [:14])}
+            else:
+                self.balance = None
+
+            # peak 块（state + caption_render + ends_at；badge_render 仅稀疏余额
+            # 型下发；badge_small_render 已停发——2026-09-04/06）
+            pk = pdata.get('peak')
+            if isinstance(pk, dict):
+                self.peak = {'state': str(pk.get('state', '') or ''),
+                             'badge_render': pk.get('badge_render'),
+                             'caption_render': pk.get('caption_render'),
+                             'ends_at': pk.get('ends_at')}
+            else:
+                self.peak = None
+
+            rows = []
+            rows_alt = []
+            for quota in pdata.get('quotas') or []:
+                window = str(quota.get('id', '?')).split(':')[-1]
+                unit = UNIT_SHORT.get(quota.get('unit'), '')
+                label = '{} {}'.format(window, unit).rstrip()
+                try:
+                    percent = float(quota.get('percent', 0.0))
+                except (TypeError, ValueError):
+                    percent = 0.0
+                # 已用/总量小字：优先服务端格式化文本（SCHEMA amount_text，
+                # 2026-08-31 起 k/m 缩写归服务端）；缺失（旧服务器）回退
+                # 端侧 fmt_amount 自算——回退式样与服务端缺省逐字相同
+                amount = str(quota.get('amount_text') or '')
+                if not amount:
+                    amount = '{} / {}'.format(
+                        fmt_amount(quota.get('used')),
+                        fmt_amount(quota.get('limit')))
+                reset_at = quota.get('reset_at')
+                rows.append((label, percent, reset_at, amount,
+                             quota.get('label_render')))
+                rows_alt.append(quota.get('label_render_alt'))
+            self._apply_deltas(rows, now_epoch, dark)
+            self.rows = rows
+
+            # 稀疏型判定：quota 为空（纯余额型）且（有余额或有峰谷）→ 大字插图竖排；
+            # pack（1 quota，无峰谷大字的度量型）走既有普通布局——与 plan 单条一致。
+            # 有 quota 且有峰谷 → 密集型：峰谷退化为 title 下两小行。
+            self._sparse = (len(rows) == 0 and (self.balance is not None
+                                               or self.peak is not None))
         # 双套记忆登记（槽位+tag → hash）：主 hash 归本套 tag，alt
         # hash 归对偶 tag——双发契约（render.check_alt 已拦缺 alt 的
         # 旧服务器）下每轮 fetch 两套都齐，不靠跨轮历史积累
@@ -667,7 +694,7 @@ class ProviderPage:
         # 峰谷签名：state（两色倒计时红色变化）+ caption_render + 大字
         # badge（仅稀疏）+ ends_at。badge_small_render 已停发。
         sig = (self.name, self.title_hash, NIGHT, self.status,
-               self.error_text,
+               self.error_text, self.partial_err,
                tuple((r[0], r[4]) for r in self.rows),
                bal.get('caption_render'), bal.get('amount_text'),
                pk.get('state'), pk.get('caption_render'),
@@ -717,6 +744,10 @@ class ProviderPage:
             self._render_sparse_full(display, font, now_epoch, store)
         else:
             self._render_rows_full(display, font, now_epoch, store)
+        # 部分 err 且无任何历史数据（首拉即失败）：数据区画红 ASCII 'err'
+        # ——错误呈现全部纯 ASCII、不入 SSR；配置派生的标题照常在上方。
+        if self.partial_err and not self.rows and self.balance is None:
+            display.text(font, 'err', 4, 64, _col(_ERR_RGB), BG())
 
     def _render_rows_full(self, display, font, now_epoch, store=None):
         """密集型：配额行（多 quota plan）或 pack/plan 单条（与 plan 一致）。

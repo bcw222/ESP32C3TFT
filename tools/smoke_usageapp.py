@@ -97,7 +97,7 @@ def main():
     d, f = FakeDisplay(), FakeFont()
     now = 1_800_000_000
 
-    # v=2 schema 形态的样例数据（契约样例；服务端 demo 假数据
+    # v=3 schema 形态的样例数据（契约样例；服务端 demo 假数据
     # 由 llm-usage-server 自测覆盖，端侧只认结构）
     glm_data = {
         'server_time': now, 'id': 'glm', 'status': 'ok',
@@ -290,19 +290,39 @@ def main():
     tpg.render(d, f, now, rstore)           # diff 补贴
     assert len(d.pngs) == png_calls + 2
 
-    # 结构化 error → 纯 ASCII 单行（2026-09-02 定稿：error 不入 SSR）；
-    # 徽标两态（2026-09-05）：status='error' 归一 stale，徽标无红 err
+    # v3 单页部分 err（2026-10-04 owner 定）：status=error **不再是以整页
+    # 为失败单位**——服务端回 200 + config 派生内容（title 等）+ 数据区
+    # 元素级 err；错误呈现纯 ASCII 不入 SSR（2026-09-02 定稿）。
+    # 徽标仍两态（2026-09-05）：error 归一 stale 灰点。
     ep2 = page.ProviderPage('E')
-    ep2.update({'id': 'e', 'status': 'error', 'updated_at': now,
-                'error': {'code': 'upstream_http_401', 'render': h_ok},
+    ep2.update({'id': 'e', 'status': 'error',
+                'error': {'code': 'upstream_http_401'},
                 'quotas': []}, now)
+    assert ep2.partial_err is True
     assert ep2.status == 'stale'
     png_before = len(d.pngs)
     ep2.render(d, f, now, rstore)
-    assert len(d.pngs) == png_before          # error 不再贴图
+    assert len(d.pngs) == png_before          # error 不贴图
     assert 'upstream_http_401' in d.texts     # 错误行 ASCII 直画
-    assert 'stale 0m' in d.texts              # 徽标 stale（带年龄）
-    assert 'err' not in d.texts               # 徽标两态：无 'err' 元素
+    assert 'stale' in d.texts                 # 徽标 stale（首拉失败无历史→无年龄）
+    assert 'err' in d.texts                   # 数据区红 ASCII 'err'（元素级）
+
+    # v3 部分 err + 有历史：复用上一轮数据、沿用其 updated_at 显示年龄，
+    # 绝不显示服务端兜底的虚假 0%（沿用总览行级 error 定稿 2026-09-17）。
+    ep2b = page.ProviderPage('E2')
+    ep2b.update({'id': 'e2', 'status': 'ok', 'updated_at': now,
+                 'quotas': [{'id': 'credits:1w', 'unit': 'credits',
+                             'percent': 42.0}]}, now)
+    assert ep2b.partial_err is False
+    ep2b.update({'id': 'e2', 'status': 'error',
+                 'error': {'code': 'upstream_timeout'},
+                 'quotas': []}, now + 600)
+    assert ep2b.partial_err is True
+    assert len(ep2b.rows) == 1                # 复用上一轮配额行
+    assert ep2b.rows[0][1] == 42.0            # percent 未被兜底 0 覆盖
+    ep2b.render(d, f, now + 600, rstore)
+    assert 'stale 10m' in d.texts             # 沿用旧 updated_at → 带年龄
+    assert 'upstream_timeout' in d.texts
 
     # 非 ASCII 错误文本不留字（乱码防护）
     ep2.set_error_keep('上游 502 错误')
@@ -582,16 +602,16 @@ def main():
         return fake_page
 
     ver_cfg = {'url': 'http://example.invalid:8765', 'key': 'testkey'}
-    ok_page = {'v': 2, 'type': 'provider', 'total': 1, 'page': 0,
+    ok_page = {'v': 3, 'type': 'provider', 'total': 1, 'page': 0,
                'id': 'p', 'status': 'ok', 'server_time': 0, 'quotas': []}
 
     orig_get = client.http_get
     try:
-        # 1) 正常：请求必带 v=2，响应回显 v=2 → 通过
+        # 1) 正常：请求必带 v=3，响应回显 v=3 → 通过
         client.http_get = make_fake_page(200, ok_page)
         got = client.fetch_page(ver_cfg, 0)
-        assert got['v'] == 2
-        assert 'v=2' in seen['paths'][-1], '请求必须带 v=2'
+        assert got['v'] == 3
+        assert 'v=3' in seen['paths'][-1], '请求必须带 v=3'
         assert 'client=1' not in seen['paths'][-1], '旧 client 参数须消失'
 
         # 2) 回显缺失 → incompatible payload（不静默按 v1 语义解析）
@@ -603,7 +623,7 @@ def main():
             assert 'incompatible payload' in str(exc)
 
         # 3) 回显版本不符（服务端降级应答）→ incompatible payload
-        client.http_get = make_fake_page(200, dict(ok_page, v=1))
+        client.http_get = make_fake_page(200, dict(ok_page, v=2))
         try:
             client.fetch_page(ver_cfg, 0)
             raise AssertionError('v 回显不符应抛 FetchError')

@@ -1,4 +1,4 @@
-"""统一 schema 客户端：GET usage-server（v=2 契约），阻塞但切片读。
+"""统一 schema 客户端：GET usage-server（v=3 契约），阻塞但切片读。
 
 为什么不用 urequests：fetch 期间要驱动时间条动画（暗色段实时增长），
 所以手写 socket，切片读回调 on_wait()。切片用 uselect.poll 窗口驱动
@@ -13,7 +13,7 @@
 「看哪页拉哪页」——fetch_page(N) 拉当前页数据，响应带 type
 （overview/provider）决定解析分发；服务器无抓取缓存，每个请求实时
 打上游，新鲜度节奏全由端侧控制：
-- GET {base}/api/page?v=2&page=N&h=16&bg=<页底>&theme=<昼夜套>
+- GET {base}/api/page?v=3&page=N&h=16&bg=<页底>&theme=<昼夜套>
   认证 `Authorization: Bearer <key>`（key 不进 URL/访问日志）；
   h=16 行高、bg=页底色、theme=昼夜（day/night 两套全量配色整体切换，
   夜间深底亮字）均计入贴图 hash——bg/theme 由 theme.py 按当前夜态给
@@ -24,7 +24,7 @@
   服务端已合成完毕，端侧逐像素直写，不做也不需要透明处理
 - 昼夜双套贴图各自缓存（服务端按 hash、端侧 rcache/），
   切换时零计算只换 hash 引用
-- 契约版本 v=2 必带，响应回显 v：端侧校验不符即
+- 契约版本 v=3 必带，响应回显 v：端侧校验不符即
   FetchError('incompatible payload')（防服务端降级应答的静默不兼容）
 - 服务端输入可信：结构校验/控制全部在服务端，端侧不做校验
 - http_get 为通用底层（render.py 贴图下载复用，sink 流式写文件）
@@ -165,9 +165,11 @@ def http_get(host, port, path, on_wait=None, sink=None, timeout_ms=30_000,
 
 _H = 16
 
-# 契约 schema 版本（SCHEMA.md「版本协商 v2」）：请求必带 v=2，
-# 响应回显 v 与之不符即 incompatible payload（防服务端降级应答）。
-SCHEMA_VERSION = 2
+# 契约 schema 版本（SCHEMA.md「版本协商」）：请求必带 v=3，响应回显
+# v 与之不符即 incompatible payload（防服务端降级应答）。
+# v3 = 单页部分 err（provider 页上游失败回 200 + config 派生内容 +
+# 数据区元素级 err，不再整页 503）。
+SCHEMA_VERSION = 3
 # SSR 贴图底色/主题随昼夜套走（theme.current_bg_hex/current_theme）：
 # 贴图与页底同色合成、前景随昼夜套，夜态切换后 hash 自动换套
 # （服务端双套各自缓存、端侧 rcache 按 hash 共存，切换零计算）。
@@ -191,7 +193,7 @@ def server_base(url):
 
 
 def _endpoint_get(server_cfg, endpoint, page=None, on_wait=None, night=False):
-    """对 {base}{endpoint}?v=2&h&bg&theme&fg&caption&peak&offpeak
+    """对 {base}{endpoint}?v=3&h&bg&theme&fg&caption&peak&offpeak
     &altbg&alttheme&altfg&altcaption&altpeak&altoffpeak 做一次 GET；
     page（页码）可选，前置拼在 v 之前。200 → 解析 json 并校验 v 回显；
     非 200/坏 json/版本不符 → FetchError。两套渲染参数均由 theme.py 按当前/对偶夜态
@@ -262,7 +264,7 @@ def _endpoint_get(server_cfg, endpoint, page=None, on_wait=None, night=False):
 
 
 def fetch_page(server_cfg, page, on_wait=None, night=False):
-    """GET /api/page?v=2&page=N：按页码查表返回当前页（响应带
+    """GET /api/page?v=3&page=N：按页码查表返回当前页（响应带
     type/total/page——overview 聚合或 provider 单页详情，按 type
     分发解析；越界回卷永不 404）。"""
     return _endpoint_get(server_cfg, '/api/page', page,
