@@ -329,6 +329,7 @@ def run(board, networks, cfg):
     next_rssi_poll = 0
     rssi_value = None            # 最近一次采集的 RSSI 文本（5s 一拍）
     rssi_drawn = None            # 当前屏幕上已画的 RSSI（None=槽被整屏刷新抹掉）
+    cd_zero_fired = None        # 已触发归零刷新的 ends_at（防每帧重复触发）
 
     def draw_rssi():
         """RSSI 角标写入（值与屏上一致时零操作）。擦除区收紧到角标
@@ -719,6 +720,12 @@ def run(board, networks, cfg):
                 force_refresh = True    # 立即发起换页 fetch
                 # 注意：换页只清零连续计数（见本段开头），不清除已记住
                 # 页——记忆是长期书签，仅开机加载失败才清除。
+                # 换页同时重置连续失败计数（2026-10-04 owner 定）：翻页
+                # 是新的诊断起点——上一张页的失败次数对当前页无意义，且
+                # 错误页屏显 fail #N 会被旧页的连败数污染。error_page
+                # 一并归零，保证屏显与计数同源（否则屏显留旧值）。
+                fails = 0
+                error_page.set_fails(0)
                 last_activity = now
 
         # ---- 手动刷新键：读到 flags 再落到局部状态（否则失联） ----
@@ -752,6 +759,24 @@ def run(board, networks, cfg):
         if was_dim and not dim:
             force_refresh = True     # 拿起来立即刷新
         was_dim = dim
+
+        # ---- 倒计时归零自动刷新（2026-10-04 owner 定）----
+        # peak.ends_at 一跨过就补一轮 fetch：换窗后旧倒计时立刻无意义，
+        # 否则屏上会一直挂 00:00:00 直到下个轮询周期（最长可达整个
+        # poll_interval）。暗屏期同样触发（owner 定）——暗屏轮询本就
+        # 稀疏，多一轮拿新窗口成本可忽略，换来醒来即见正确倒计时。
+        # 防重触发：以 ends_at 值为键，同一个归零点只触发一次；拉到
+        # 新 ends_at 后键自然不匹配，下个窗口可再次触发。失败不重试
+        # 触发（避免连续失败时刷新风暴），由常规轮询兜底。
+        if pages and cursor != ERR_CURSOR:
+            cur_zero = page_at(cursor)
+            ends_at = (cur_zero.countdown_ends_at()
+                       if cur_zero is not None else None)
+            if ends_at is not None and ends_at != cd_zero_fired:
+                if now_epoch() >= ends_at:
+                    cd_zero_fired = ends_at
+                    force_refresh = True
+                    print('[usage] countdown zero, force refresh')
 
         # ---- 调度 fetch（恒定周期 + 强刷 + 换页 pending）----
         if force_refresh or timeline.due() or pending_page is not None:
