@@ -796,6 +796,18 @@ class ProviderPage:
                                  color, BG())
             self._last.append([pct, fill_w, color, cd, amount, delta])
 
+    def countdown_ends_at(self):
+        """本页倒计时归零时刻（peak.ends_at，unix 秒）；无 peak /
+        缺 ends_at / 非数值 → None。app 主循环据此判断是否补一轮
+        fetch（2026-10-04 owner 定：倒计时归零自动触发一次刷新）。
+        与 _peak_cd 分离：本方法不依赖 now_clock，纯数据查询。"""
+        if not self.peak:
+            return None
+        v = self.peak.get('ends_at')
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        return v
+
     def _peak_cd(self, now_epoch):
         """峰谷倒计时秒（ends_at - now）；无 peak 返回 None。"""
         if not self.peak or not self.peak.get('ends_at'):
