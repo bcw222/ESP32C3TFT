@@ -559,7 +559,10 @@ class ProviderPage:
                 # 2026-08-31 起 k/m 缩写归服务端）；缺失（旧服务器）回退
                 # 端侧 fmt_amount 自算——回退式样与服务端缺省逐字相同
                 amount = str(quota.get('amount_text') or '')
-                if not amount:
+                # used/limit 都缺（percent-only 窗口，如 OpenCode Go 三窗）
+                # → 不拼 "? / ?"，整段小字隐藏（owner 2026-10-23 定）。
+                if not amount and quota.get('used') is not None \
+                        and quota.get('limit') is not None:
                     amount = '{} / {}'.format(
                         fmt_amount(quota.get('used')),
                         fmt_amount(quota.get('limit')))
